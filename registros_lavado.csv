@@ -1,0 +1,9 @@
+ID,Tipo,Placa,Servicio,Pago,Monto,Fecha,Lavador 1,Lavador 2,Lavador 3,Motivo Gasto,Precio Gasto,Método Gasto,Local,RUC/DNI,Razón Social/Nombre,Número Cliente,Correo Cliente,Registrado por
+1790992707829,Auto,ADX-789,Lavado Completo,Transferencia,S/ 16.00,2026/10/02 20:58,Juan,Pedro,-,-,-,Transferencia,Búnker 1,-,-,-,-,Administrador
+1790992767714,Moto,XDA-78,Lavado Básico,Plin,S/ 16.00,2026/10/02 20:59,Carlos,Ricardo,-,-,S/ 13.00,Yape,Búnker 1,-,-,-,-,Administrador
+1790992798499,Sedán,LOL,Lavado Básico,Yape,S/ 16.00,2026/10/02 20:59,Carlos,-,-,-,S/ 2.00,Efectivo,Búnker 1,-,-,-,-,Administrador
+1790992831187,Sedán,AAS-789,Lavado Básico,Tarjeta,S/ 16.00,2026/10/02 21:00,Ricardo,Juan,-,-,S/ 5.00,Tarjeta,Búnker 1,-,-,-,-,Administrador
+1791002182921,Sedán,ASDAS,Lavado Básico,Yape,S/ 20.00,2026/10/02 23:36,Juan,-,-,AS,S/ 5.00,Efectivo,Búnker 1,-,-,-,-,Administrador
+1791003656289,Sedán,ASD-789,Lavado Básico,Efectivo,S/ 20.00,2026/10/03 00:00,Pedro,Carlos,Juan,-,S/ 15.00,Plin,Búnker 1,-,-,-,-,Supervisor1
+1791003702216,Sedán,QQQQ,Lavado Básico,Plin,S/ 10.00,2026/10/03 00:01,Juan,-,-,-,S/ 10.00,Yape,Búnker 1,-,-,-,-,Supervisor1
+1791003769961,Camioneta,AES,Lavado Básico,Yape,S/ 19.00,2026/10/03 00:02,Pedro,Ricardo,-,-,S/ 16.00,Tarjeta,Búnker 1,-,-,-,-,Supervisor1

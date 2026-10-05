@@ -1,0 +1,6 @@
+Sedán
+Camioneta
+Moto
+Auto
+Van
+Bicicleta

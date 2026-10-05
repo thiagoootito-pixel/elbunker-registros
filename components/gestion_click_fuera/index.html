@@ -1,0 +1,204 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+  </head>
+  <body>
+    <script>
+      function postMessage(type, extra = {}) {
+        window.parent.postMessage(
+          { isStreamlitMessage: true, type, ...extra },
+          "*"
+        );
+      }
+
+      postMessage("streamlit:componentReady", { apiVersion: 1 });
+      postMessage("streamlit:setFrameHeight", { height: 0 });
+
+      const document = window.parent.document;
+      let repositionScheduled = false;
+
+      function setImportantStyle(element, property, value) {
+        if (element.style.getPropertyValue(property) !== value) {
+          element.style.setProperty(property, value, "important");
+        }
+      }
+
+      function positionBelow(element, anchor, minWidth = 0, zIndex = 1000) {
+        const anchorBounds = anchor.getBoundingClientRect();
+        const width = Math.max(element.getBoundingClientRect().width, minWidth);
+        const left = Math.max(
+          8,
+          Math.min(anchorBounds.left, window.parent.innerWidth - width - 8)
+        );
+        const top = anchorBounds.bottom + 8;
+        const availableHeight = Math.max(
+          0,
+          window.parent.innerHeight - top - 8
+        );
+
+        setImportantStyle(element, "position", "fixed");
+        setImportantStyle(element, "top", `${top}px`);
+        setImportantStyle(element, "bottom", "auto");
+        setImportantStyle(element, "left", `${left}px`);
+        setImportantStyle(element, "right", "auto");
+        setImportantStyle(element, "transform", "none");
+        setImportantStyle(element, "max-height", `${availableHeight}px`);
+        setImportantStyle(
+          element,
+          "max-width",
+          `${window.parent.innerWidth - 16}px`
+        );
+        setImportantStyle(element, "overflow-y", "auto");
+        setImportantStyle(element, "overscroll-behavior", "contain");
+        setImportantStyle(element, "z-index", String(zIndex));
+        if (minWidth > 0) {
+          setImportantStyle(element, "min-width", `${minWidth}px`);
+        }
+      }
+
+      function positionFloatingMenus() {
+        repositionScheduled = false;
+
+        const calendarPopovers = document.querySelectorAll(
+          '[data-testid="stPopoverBody"]:has([class*="_mes_calendario"])'
+        );
+        for (const popover of calendarPopovers) {
+          const triggers = document.querySelectorAll(
+            '[class*="_popover_calendario"] [data-testid="stPopoverButton"]'
+          );
+          const calendarKey = [...popover.querySelectorAll("[class]")]
+            .flatMap((element) => [...element.classList])
+            .find(
+              (className) =>
+                className.startsWith("st-key-") &&
+                className.endsWith("_mes_calendario")
+            );
+          const popoverKey = calendarKey?.replace(
+            "_mes_calendario",
+            "_popover_calendario"
+          );
+          const trigger =
+            [...triggers].find((button) => {
+              if (!popoverKey) return false;
+              let ancestor = button;
+              while (ancestor) {
+                if (ancestor.classList.contains(popoverKey)) return true;
+                ancestor = ancestor.parentElement;
+              }
+              return false;
+            }) ||
+            [...triggers].find(
+              (button) => button.getAttribute("aria-expanded") === "true"
+            ) || [...triggers].find((button) => button.getClientRects().length);
+          if (trigger) {
+            positionBelow(popover, trigger, 0, 1000);
+          }
+        }
+
+        const openComboboxes = document.querySelectorAll(
+          '[role="combobox"][aria-expanded="true"]'
+        );
+        for (const combobox of openComboboxes) {
+          const listboxId = combobox.getAttribute("aria-controls");
+          const listbox = listboxId
+            ? document.getElementById(listboxId)
+            : document.querySelector('[role="listbox"]');
+          if (!listbox) continue;
+
+          const popover =
+            listbox.closest('[data-baseweb="popover"]') ||
+            listbox.closest('[data-testid="stSelectboxVirtualDropdown"]') ||
+            listbox;
+          const esDesplegableCalendario = Boolean(
+            combobox.closest(
+              '[data-testid="stPopoverBody"]:has([class*="_mes_calendario"])'
+            )
+          );
+          combobox.classList.toggle(
+            "app-calendar-selectbox",
+            esDesplegableCalendario
+          );
+          popover.classList.toggle(
+            "app-calendar-options-menu",
+            esDesplegableCalendario
+          );
+          popover.classList.toggle(
+            "app-light-options-menu",
+            !esDesplegableCalendario
+          );
+          listbox.classList.toggle(
+            "app-calendar-options-menu",
+            esDesplegableCalendario
+          );
+          listbox.classList.toggle(
+            "app-light-options-menu",
+            !esDesplegableCalendario
+          );
+          for (const menuPart of listbox.querySelectorAll(
+            '[role="option"], [data-baseweb="menu"]'
+          )) {
+            menuPart.classList.toggle(
+              "app-calendar-options-menu",
+              esDesplegableCalendario
+            );
+            menuPart.classList.toggle(
+              "app-light-options-menu",
+              !esDesplegableCalendario
+            );
+          }
+          positionBelow(
+            popover,
+            combobox,
+            combobox.getBoundingClientRect().width,
+            2147483647
+          );
+        }
+      }
+
+      function scheduleReposition() {
+        if (repositionScheduled) return;
+        repositionScheduled = true;
+        requestAnimationFrame(positionFloatingMenus);
+      }
+
+      const observer = new MutationObserver(scheduleReposition);
+      observer.observe(document.body, {
+        attributes: true,
+        attributeFilter: ["aria-expanded", "aria-controls"],
+        childList: true,
+        subtree: true,
+      });
+      window.parent.addEventListener("resize", scheduleReposition);
+      window.parent.addEventListener("scroll", scheduleReposition, true);
+      document.addEventListener("click", scheduleReposition, true);
+
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!target || typeof target.closest !== "function") return;
+        if (
+          !document.querySelector(
+            '[class*="st-key-fila_gestion_"] button[kind="primary"]'
+          )
+        ) {
+          return;
+        }
+        if (target.closest('[class*="st-key-tabla_gestion_"]')) return;
+        if (
+          target.closest(
+            '[data-testid="stButton"], input, textarea, select, a, [role="button"], [role="option"], [role="listbox"]'
+          )
+        ) {
+          return;
+        }
+
+        postMessage("streamlit:setComponentValue", {
+          value: { nonce: `${Date.now()}-${Math.random()}` },
+          dataType: "json",
+        });
+      });
+
+      scheduleReposition();
+    </script>
+  </body>
+</html>

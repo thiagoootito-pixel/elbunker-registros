@@ -1,0 +1,21 @@
+{
+  "usuarios": {
+    "Titovallejo": {
+      "rol": "Administrador",
+      "salt": null,
+      "contrasena_hash": null,
+      "ultimo_inicio_sesion": "2026-10-04T20:09:44-05:00",
+      "activo": true,
+      "local": "Todos los locales"
+    },
+    "Supervisor1": {
+      "rol": "Supervisor",
+      "salt": "5c8f490939ad0d18fa27a2c158bda1d9",
+      "contrasena_hash": "7a5d4fc5006a142432741f02b8eeee8b21f7849e74091ddda00d890c498c320b",
+      "ultimo_inicio_sesion": "2026-10-03T21:36:46-05:00",
+      "activo": true,
+      "local": "Búnker 1"
+    }
+  },
+  "eliminados_definitivamente": []
+}

@@ -1,0 +1,5 @@
+Sedán
+SUV
+Camioneta
+Moto
+Van
