@@ -2,12 +2,9 @@ import base64
 import calendar
 import hashlib
 import hmac
-import json
 import os
 import re
 import secrets
-import sqlite3
-import tempfile
 import time
 import unicodedata
 from datetime import date, datetime
@@ -15,17 +12,28 @@ from html import escape
 from io import BytesIO
 
 import pandas as pd
+import psycopg2
 import streamlit as st
 from database import (
     COLUMNAS_REGISTRO,
+    ITERACIONES_HASH_CONTRASENA,
+    LOCAL_GLOBAL,
+    LOCALES_VALIDOS,
+    USUARIOS_PREDEFINIDOS,
     actualizar_registro,
+    actualizar_ultimo_inicio_sesion,
     conectar,
     consultar_registros,
+    consultar_usuarios,
+    consultar_usuarios_eliminados,
     eliminar_registro,
     eliminar_registros_supervisor_en_conexion,
+    guardar_usuarios as guardar_usuarios_en_db,
+    guardar_usuarios_en_conexion,
     inicializar_base_datos,
     insertar_registro,
 )
+
 
 # Configuración de la página
 st.set_page_config(
@@ -40,14 +48,8 @@ with open(os.path.join(os.path.dirname(__file__), "bunker_logo.png"), "rb") as a
 with open(os.path.join(os.path.dirname(__file__), "banner_bunker.png"), "rb") as archivo_banner:
     banner_base64 = base64.b64encode(archivo_banner.read()).decode("ascii")
 
-USUARIOS_PREDEFINIDOS = {
-    "Titovallejo": {"contrasena": "080507", "rol": "Administrador"},
-}
-ARCHIVO_USUARIOS = os.path.join(os.path.dirname(__file__), "usuarios.json")
 ROLES_USUARIO = ["Supervisor", "Administrador"]
-LOCALES = ["Búnker 1", "Búnker 2", "Búnker 3"]
-LOCAL_GLOBAL = "Todos los locales"
-ITERACIONES_HASH_CONTRASENA = 600_000
+LOCALES = list(LOCALES_VALIDOS)
 FECHA_MINIMA_CALENDARIO = date(2026, 1, 1)
 FECHA_MAXIMA_CALENDARIO = date(2036, 12, 31)
 
@@ -174,8 +176,8 @@ def seleccionar_fecha(etiqueta, clave, fecha_predeterminada, on_change=None):
 
 
 def verificar_contrasena(cuenta, contrasena):
-    if cuenta["contrasena_hash"] is None:
-        return hmac.compare_digest(cuenta["contrasena"], contrasena)
+    if not cuenta["salt"] or not cuenta["contrasena_hash"]:
+        return False
     hash_ingresado = hashlib.pbkdf2_hmac(
         "sha256",
         contrasena.encode("utf-8"),
@@ -185,152 +187,47 @@ def verificar_contrasena(cuenta, contrasena):
     return hmac.compare_digest(cuenta["contrasena_hash"], hash_ingresado)
 
 
-def guardar_usuarios(
-    usuarios, ruta=ARCHIVO_USUARIOS, usuarios_eliminados_definitivamente=()
-):
-    datos = {
-        "usuarios": {
-            nombre: {
-                "rol": cuenta["rol"],
-                "salt": cuenta["salt"],
-                "contrasena_hash": cuenta["contrasena_hash"],
-                "ultimo_inicio_sesion": cuenta["ultimo_inicio_sesion"],
-                "activo": cuenta["activo"],
-                "local": cuenta["local"],
-            }
-            for nombre, cuenta in usuarios.items()
-        },
-        "eliminados_definitivamente": sorted(
-            usuarios_eliminados_definitivamente, key=str.casefold
-        ),
-    }
-    with open(ruta, "w", encoding="utf-8") as archivo:
-        json.dump(datos, archivo, ensure_ascii=False, indent=2)
-
-
 def cargar_usuarios():
-    usuarios = {
-        nombre: {
-            "contrasena": cuenta["contrasena"],
-            "contrasena_hash": None,
-            "salt": None,
-            "rol": cuenta["rol"],
-            "ultimo_inicio_sesion": None,
-            "activo": True,
-            "local": LOCAL_GLOBAL,
-            "predefinido": True,
-        }
-        for nombre, cuenta in USUARIOS_PREDEFINIDOS.items()
-    }
-    if not os.path.exists(ARCHIVO_USUARIOS):
-        return usuarios, set()
-
-    try:
-        with open(ARCHIVO_USUARIOS, "r", encoding="utf-8") as archivo:
-            datos = json.load(archivo)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"No se pudo leer el archivo de usuarios: {error}") from error
-
-    if not isinstance(datos, dict) or not isinstance(datos.get("usuarios"), dict):
-        raise ValueError("El archivo de usuarios tiene un formato inválido.")
-
-    eliminados = datos.get("eliminados_definitivamente", [])
-    if not isinstance(eliminados, list) or any(
-        not isinstance(nombre, str) or not nombre.strip()
-        for nombre in eliminados
+    if (
+        "_usuarios_sesion" not in st.session_state
+        or "_usuarios_eliminados_sesion" not in st.session_state
     ):
-        raise ValueError("La lista de usuarios eliminados definitivamente no es válida.")
-    eliminados = {nombre.strip().casefold() for nombre in eliminados}
-    nombres_guardados = {
-        nombre.casefold() for nombre in datos["usuarios"] if isinstance(nombre, str)
-    }
-    eliminados.update(
-        nombre.casefold()
-        for nombre in USUARIOS_PREDEFINIDOS
-        if nombre.casefold() not in nombres_guardados
+        st.session_state["_usuarios_sesion"] = consultar_usuarios()
+        st.session_state["_usuarios_eliminados_sesion"] = (
+            consultar_usuarios_eliminados()
+        )
+    return (
+        st.session_state["_usuarios_sesion"],
+        st.session_state["_usuarios_eliminados_sesion"],
     )
-    for nombre in USUARIOS_PREDEFINIDOS:
-        if nombre.casefold() in eliminados:
-            usuarios.pop(nombre, None)
 
-    for nombre, registro in datos["usuarios"].items():
-        if not isinstance(nombre, str) or not isinstance(registro, dict):
-            raise ValueError("El archivo de usuarios contiene un registro inválido.")
-        if nombre.casefold() in eliminados:
-            continue
-        rol = registro.get("rol")
-        activo = registro.get("activo")
-        ultimo_inicio = registro.get("ultimo_inicio_sesion")
-        if not isinstance(activo, bool) or (
-            ultimo_inicio is not None and not isinstance(ultimo_inicio, str)
-        ):
-            raise ValueError(f"El registro de usuario {nombre!r} está incompleto.")
-        if ultimo_inicio is not None:
-            try:
-                datetime.fromisoformat(ultimo_inicio)
-            except ValueError as error:
-                raise ValueError(
-                    f"La fecha del último inicio de sesión de {nombre!r} no es válida."
-                ) from error
 
-        if nombre in USUARIOS_PREDEFINIDOS:
-            rol_anterior = (
-                re.fullmatch(r"Supervisor [1-4]", str(rol))
-                and USUARIOS_PREDEFINIDOS[nombre]["rol"] == "Supervisor"
-            )
-            if rol != USUARIOS_PREDEFINIDOS[nombre]["rol"] and not rol_anterior:
-                eliminados.add(nombre.casefold())
-                usuarios.pop(nombre, None)
-                continue
-            usuarios[nombre]["ultimo_inicio_sesion"] = ultimo_inicio
-            usuarios[nombre]["activo"] = (
-                True if rol == "Administrador" else activo
-            )
-            usuarios[nombre]["local"] = LOCAL_GLOBAL
-            continue
+def _actualizar_usuarios_en_sesion(
+    usuarios_actualizados, eliminados_actualizados
+):
+    global usuarios, usuarios_eliminados_definitivamente
 
-        salt = registro.get("salt")
-        contrasena_hash = registro.get("contrasena_hash")
-        try:
-            salt_bytes = bytes.fromhex(salt) if isinstance(salt, str) else b""
-            hash_bytes = (
-                bytes.fromhex(contrasena_hash)
-                if isinstance(contrasena_hash, str)
-                else b""
-            )
-        except ValueError as error:
-            raise ValueError(
-                f"La contraseña guardada para {nombre!r} no es válida."
-            ) from error
-        if (
-            (
-                rol not in ROLES_USUARIO
-                and not re.fullmatch(r"Supervisor [1-4]", str(rol))
-            )
-            or len(salt_bytes) != 16
-            or len(hash_bytes) != 32
-        ):
-            raise ValueError(f"El registro de usuario {nombre!r} no es válido.")
-        if rol not in ROLES_USUARIO:
-            rol = "Supervisor"
-        local = registro.get("local")
-        if local is None:
-            local = LOCAL_GLOBAL if rol == "Administrador" else LOCALES[0]
-        if rol == "Administrador":
-            local = LOCAL_GLOBAL
-        elif local not in LOCALES:
-            raise ValueError(f"El local guardado para {nombre!r} no es válido.")
-        usuarios[nombre] = {
-            "contrasena": None,
-            "contrasena_hash": contrasena_hash,
-            "salt": salt,
-            "rol": rol,
-            "ultimo_inicio_sesion": ultimo_inicio,
-            "activo": activo,
-            "local": local,
-            "predefinido": False,
-        }
-    return usuarios, eliminados
+    usuarios = {
+        nombre: cuenta.copy()
+        for nombre, cuenta in usuarios_actualizados.items()
+    }
+    usuarios_eliminados_definitivamente = set(eliminados_actualizados)
+    st.session_state["_usuarios_sesion"] = usuarios
+    st.session_state["_usuarios_eliminados_sesion"] = (
+        usuarios_eliminados_definitivamente
+    )
+
+
+def guardar_usuarios(
+    usuarios_actualizados, usuarios_eliminados_definitivamente=()
+):
+    guardar_usuarios_en_db(
+        usuarios_actualizados,
+        usuarios_eliminados_definitivamente,
+    )
+    _actualizar_usuarios_en_sesion(
+        usuarios_actualizados, usuarios_eliminados_definitivamente
+    )
 
 
 @st.dialog("Agregar nuevo usuario")
@@ -409,7 +306,7 @@ def mostrar_formulario_nuevo_usuario():
                     usuarios_eliminados_definitivamente
                 ),
             )
-        except OSError as error:
+        except (psycopg2.Error, ValueError) as error:
             st.error(f"No se pudo guardar el nuevo usuario: {error}")
         else:
             st.session_state["mensaje_gestion_usuarios"] = (
@@ -484,7 +381,7 @@ def mostrar_formulario_editar_usuario():
                 usuarios_eliminados_definitivamente
             ),
         )
-    except OSError as error:
+    except (psycopg2.Error, ValueError) as error:
         st.error(f"No se pudo guardar el usuario: {error}")
     else:
         st.session_state["mensaje_gestion_usuarios"] = (
@@ -561,7 +458,7 @@ def mostrar_formulario_baja_usuario():
                     usuarios_eliminados_definitivamente
                 ),
             )
-        except OSError as error:
+        except (psycopg2.Error, ValueError) as error:
             st.error(f"No se pudo dar de baja al usuario: {error}")
         else:
             st.session_state["mensaje_gestion_usuarios"] = (
@@ -572,15 +469,17 @@ def mostrar_formulario_baja_usuario():
 
 try:
     usuarios, usuarios_eliminados_definitivamente = cargar_usuarios()
-except ValueError as error:
+except (psycopg2.Error, ValueError) as error:
     st.error(str(error))
     st.stop()
 
-VERSION_AUTENTICACION = 2
+VERSION_AUTENTICACION = 3
 
 if st.session_state.get("_version_autenticacion") != VERSION_AUTENTICACION:
     st.session_state.login_completado = False
     st.session_state.admin_autorizado = False
+    st.session_state.pop("_registros_sesion", None)
+    st.session_state.pop("_alcance_registros_sesion", None)
     st.session_state.pop("usuario_actual", None)
     st.session_state.pop("rol_usuario", None)
     st.session_state._version_autenticacion = VERSION_AUTENTICACION
@@ -718,6 +617,11 @@ if not st.session_state.login_completado:
                 '<p class="login-eyebrow">ACCESO AL SISTEMA</p><h1 class="login-title">Iniciar sesión</h1>',
                 unsafe_allow_html=True,
             )
+            if not usuarios:
+                st.warning(
+                    "No hay cuentas cargadas en Supabase. Migra los usuarios "
+                    "existentes con `python migrar_usuarios_a_supabase.py --apply`."
+                )
             with st.form("login_form"):
                 usuario_login = st.text_input("Usuario", key="usuario_login")
                 contrasena_login = st.text_input(
@@ -734,19 +638,23 @@ if not st.session_state.login_completado:
                     and cuenta["activo"]
                     and verificar_contrasena(cuenta, contrasena_login)
                 ):
-                    cuenta["ultimo_inicio_sesion"] = datetime.now().astimezone().isoformat(
+                    ultimo_inicio_sesion = datetime.now().astimezone().isoformat(
                         timespec="seconds"
                     )
                     try:
-                        guardar_usuarios(
-                            usuarios,
-                            usuarios_eliminados_definitivamente=(
-                                usuarios_eliminados_definitivamente
-                            ),
+                        actualizado = actualizar_ultimo_inicio_sesion(
+                            nombre_usuario_login,
+                            ultimo_inicio_sesion,
                         )
-                    except OSError as error:
+                        if not actualizado:
+                            raise ValueError(
+                                "La cuenta dejó de existir durante el inicio de sesión."
+                            )
+                    except (psycopg2.Error, ValueError) as error:
                         st.error(f"No se pudo registrar el inicio de sesión: {error}")
                     else:
+                        cuenta["ultimo_inicio_sesion"] = ultimo_inicio_sesion
+                        st.session_state["_usuarios_sesion"] = usuarios
                         with st.spinner("Verificando acceso..."):
                             time.sleep(0.6)
                         st.session_state.login_completado = True
@@ -775,6 +683,10 @@ if st.session_state.login_completado:
     if not cuenta_actual or not cuenta_actual["activo"]:
         st.session_state.login_completado = False
         st.session_state.admin_autorizado = False
+        st.session_state.pop("_registros_sesion", None)
+        st.session_state.pop("_alcance_registros_sesion", None)
+        st.session_state.pop("_usuarios_sesion", None)
+        st.session_state.pop("_usuarios_eliminados_sesion", None)
         st.session_state.pop("usuario_actual", None)
         st.session_state.pop("rol_usuario", None)
         st.rerun()
@@ -1572,8 +1484,6 @@ st.markdown(
 )
 
 DIRECTORIO_APP = os.path.dirname(os.path.abspath(__file__))
-ARCHIVO_CSV = os.path.join(DIRECTORIO_APP, "registros_lavado.csv")
-ARCHIVO_DB = os.path.join(DIRECTORIO_APP, "bunker.db")
 ARCHIVO_LAVADORES = "lavadores.txt"
 ARCHIVO_VEHICULOS = "vehiculos.txt"
 ARCHIVO_SERVICIOS = "servicios.txt"
@@ -1627,74 +1537,93 @@ def guardar_catalogo(archivo, valores):
         catalogo.write("\n".join(valores) + "\n")
 
 def consultar_dataframe(local=None, fecha=None, supervisor=None, mes=None):
-    filas = consultar_registros(
-        ARCHIVO_DB,
-        local=local,
-        fecha=fecha,
-        mes=mes,
-        supervisor=supervisor,
-    )
-    df = pd.DataFrame.from_records(
-        filas,
-        columns=COLUMNAS_REGISTRO.values(),
-    )
-    df = df.rename(
-        columns={
-            nombre_sql: nombre_app
-            for nombre_app, nombre_sql in COLUMNAS_REGISTRO.items()
-        }
-    )
-    return df.reindex(columns=COLUMNAS_VALIDAS, fill_value="")
+    df = _obtener_registros_sesion()
+    if local and local not in {LOCAL_GLOBAL, "Todos los locales"}:
+        df = df.loc[df["Local"].astype(str) == str(local)]
+    if fecha is not None and not df.empty:
+        fechas = df["Fecha"].map(parsear_fecha)
+        df = df.loc[
+            fechas.map(
+                lambda valor: pd.notna(valor) and valor.date() == fecha
+            )
+        ]
+    if mes is not None and not df.empty:
+        fechas = df["Fecha"].map(parsear_fecha)
+        df = df.loc[
+            fechas.map(
+                lambda valor: pd.notna(valor)
+                and valor.year == mes.year
+                and valor.month == mes.month
+            )
+        ]
+    if supervisor is not None:
+        responsables = (
+            df["Registrado por"].fillna("").astype(str).str.strip().str.casefold()
+        )
+        df = df.loc[responsables == str(supervisor).strip().casefold()]
+    return df.reindex(columns=COLUMNAS_VALIDAS, fill_value="").copy()
+
+
+def _obtener_registros_sesion(forzar_recarga=False):
+    nombre_usuario = st.session_state.get("usuario_actual")
+    cuenta = usuarios.get(nombre_usuario, {})
+    rol = cuenta.get("rol", st.session_state.get("rol_usuario", ""))
+    if rol == "Administrador":
+        local_alcance = None
+    else:
+        local_alcance = cuenta.get("local")
+        if local_alcance not in LOCALES:
+            raise ValueError(
+                "La cuenta no tiene un local válido para consultar registros."
+            )
+
+    alcance = (nombre_usuario, rol, local_alcance)
+    if (
+        forzar_recarga
+        or st.session_state.get("_alcance_registros_sesion") != alcance
+        or "_registros_sesion" not in st.session_state
+    ):
+        filas = consultar_registros(local=local_alcance)
+        df = pd.DataFrame.from_records(
+            filas,
+            columns=COLUMNAS_REGISTRO.values(),
+        )
+        df = df.rename(
+            columns={
+                nombre_sql: nombre_app
+                for nombre_app, nombre_sql in COLUMNAS_REGISTRO.items()
+            }
+        )
+        st.session_state["_registros_sesion"] = df.reindex(
+            columns=COLUMNAS_VALIDAS, fill_value=""
+        )
+        st.session_state["_alcance_registros_sesion"] = alcance
+    return st.session_state["_registros_sesion"].copy()
+
+
+def refrescar_registros_sesion():
+    if st.session_state.get("login_completado"):
+        _obtener_registros_sesion(forzar_recarga=True)
 
 
 def guardar_eliminacion_supervisor(
     usuarios_actualizados,
     nombre_supervisor,
-    usuarios_eliminados_definitivamente,
+    eliminados_actualizados,
 ):
-    contenido_original = None
-    if os.path.exists(ARCHIVO_USUARIOS):
-        with open(ARCHIVO_USUARIOS, "rb") as archivo_original:
-            contenido_original = archivo_original.read()
-    directorio = os.path.dirname(os.path.abspath(ARCHIVO_USUARIOS))
-    ruta_temporal = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="",
-            dir=directorio,
-            delete=False,
-        ) as archivo_temporal:
-            ruta_temporal = archivo_temporal.name
-        guardar_usuarios(
-            usuarios_actualizados,
-            ruta_temporal,
-            usuarios_eliminados_definitivamente,
+    with conectar() as conexion:
+        eliminar_registros_supervisor_en_conexion(
+            conexion, nombre_supervisor
         )
-        with conectar(ARCHIVO_DB) as conexion:
-            eliminar_registros_supervisor_en_conexion(
-                conexion, nombre_supervisor
-            )
-            os.replace(ruta_temporal, ARCHIVO_USUARIOS)
-            ruta_temporal = None
-    except Exception as error:
-        try:
-            if contenido_original is None:
-                if os.path.exists(ARCHIVO_USUARIOS):
-                    os.remove(ARCHIVO_USUARIOS)
-            else:
-                with open(ARCHIVO_USUARIOS, "wb") as archivo_restauracion:
-                    archivo_restauracion.write(contenido_original)
-        except OSError as error_restauracion:
-            raise OSError(
-                f"{error}; no se pudo restaurar el archivo de usuarios: "
-                f"{error_restauracion}"
-            ) from error
-        raise
-    finally:
-        if ruta_temporal and os.path.exists(ruta_temporal):
-            os.remove(ruta_temporal)
+        guardar_usuarios_en_conexion(
+            conexion,
+            usuarios_actualizados,
+            eliminados_actualizados,
+        )
+    _actualizar_usuarios_en_sesion(
+        usuarios_actualizados, eliminados_actualizados
+    )
+    refrescar_registros_sesion()
 
 def limpiar_monto(valor):
     try:
@@ -2115,12 +2044,14 @@ def validar_campos_gasto(precio_gasto, metodo_gasto):
     return errores
 
 
-# --- CARGAR DATOS INICIALES DESDE SQLITE ---
-try:
-    inicializar_base_datos(ARCHIVO_DB, ARCHIVO_CSV)
-except (OSError, ValueError, sqlite3.Error, UnicodeDecodeError) as error:
-    st.error(f"No se pudieron cargar los registros: {error}")
-    st.stop()
+# --- INICIALIZAR ESQUEMA DE POSTGRESQL UNA VEZ POR SESIÓN ---
+if not st.session_state.get("_esquema_postgresql_inicializado", False):
+    try:
+        inicializar_base_datos()
+    except (OSError, ValueError, psycopg2.Error) as error:
+        st.error(f"No se pudieron cargar los registros: {error}")
+        st.stop()
+    st.session_state["_esquema_postgresql_inicializado"] = True
 
 def notificar_exito(mensaje, tipo="exito", destino=None):
     st.session_state.notificacion_exito = {
@@ -2416,6 +2347,11 @@ if st.session_state.get("menu_activo") not in opciones_navegacion:
         menu_anterior if menu_anterior in opciones_navegacion else "Registros"
     )
 
+
+def actualizar_menu_activo(opcion):
+    st.session_state.menu_activo = opcion
+
+
 st.sidebar.markdown(
     f'<div class="sidebar-logo-container"><img src="data:image/png;base64,{logo_base64}" alt="The Bunker Car Wash"></div>',
     unsafe_allow_html=True,
@@ -2446,14 +2382,14 @@ st.sidebar.markdown(
 )
 
 for opcion in opciones_navegacion:
-    if st.sidebar.button(
+    st.sidebar.button(
         opcion,
         key=f"navegacion_{claves_navegacion[opcion]}",
         type="primary" if st.session_state.menu_activo == opcion else "secondary",
         use_container_width=True,
-    ):
-        st.session_state.menu_activo = opcion
-        st.rerun()
+        on_click=actualizar_menu_activo,
+        args=(opcion,),
+    )
 
 seccion = st.session_state.menu_activo
 if "admin_autorizado" not in st.session_state:
@@ -2535,6 +2471,10 @@ def mostrar_menu_usuario():
             st.session_state.login_completado = False
             st.session_state.admin_autorizado = False
             st.session_state.menu_activo = "Registros"
+            st.session_state.pop("_registros_sesion", None)
+            st.session_state.pop("_alcance_registros_sesion", None)
+            st.session_state.pop("_usuarios_sesion", None)
+            st.session_state.pop("_usuarios_eliminados_sesion", None)
             for key in (
                 "usuario_actual",
                 "rol_usuario",
@@ -2614,7 +2554,7 @@ def mostrar_confirmacion_eliminar_supervisor(nombre):
             nombre,
             eliminados_actualizados,
         )
-    except (OSError, sqlite3.Error) as error:
+    except (OSError, psycopg2.Error) as error:
         st.error(f"No se pudo completar la eliminación definitiva: {error}")
     else:
         st.session_state.pop("supervisor_detalle_finanzas", None)
@@ -3956,15 +3896,15 @@ if btn_guardar:
                 }
                 try:
                     actualizado = actualizar_registro(
-                        ARCHIVO_DB,
                         st.session_state.edit_id,
                         st.session_state.edit_local,
                         cambios_registro,
                     )
-                except (sqlite3.Error, ValueError) as error:
+                except (psycopg2.Error, ValueError) as error:
                     st.error(f"No se pudo actualizar el registro: {error}")
                 else:
                     if actualizado:
+                        refrescar_registros_sesion()
                         limpiar_formulario()
                         notificar_exito("¡Se actualizó correctamente!")
                         st.rerun()
@@ -4009,10 +3949,11 @@ if btn_guardar:
                 ),
             }
             try:
-                insertar_registro(ARCHIVO_DB, nuevo_registro)
-            except (sqlite3.Error, ValueError) as error:
+                insertar_registro(nuevo_registro)
+            except (psycopg2.Error, ValueError) as error:
                 st.error(f"No se pudo guardar el registro: {error}")
             else:
+                refrescar_registros_sesion()
                 limpiar_formulario()
                 notificar_exito("¡Se registró correctamente!")
                 st.rerun()
@@ -4025,14 +3966,14 @@ if btn_eliminar and st.session_state.edit_id:
     else:
         try:
             eliminado = eliminar_registro(
-                ARCHIVO_DB,
                 st.session_state.edit_id,
                 st.session_state.edit_local,
             )
-        except (sqlite3.Error, ValueError) as error:
+        except (psycopg2.Error, ValueError) as error:
             st.error(f"No se pudo eliminar el registro: {error}")
         else:
             if eliminado:
+                refrescar_registros_sesion()
                 limpiar_formulario()
                 notificar_exito(
                     "El registro se eliminó correctamente.", "eliminacion"

@@ -166,6 +166,10 @@ def reset_application_data(directory, backup_root, apply=False):
         row_counts = _get_table_row_counts(connection)
 
     print(f"Cuenta que se conservará sin cambios: {ADMIN_USERNAME}")
+    print(
+        "Aviso: este script reinicia únicamente la base SQLite local; "
+        "no modifica Supabase."
+    )
     for table, count in row_counts.items():
         print(f"Filas que se vaciarán de {table}: {count}")
     print("El CSV de migración se conservará únicamente con sus cabeceras.")
@@ -247,8 +251,8 @@ def reset_application_data(directory, backup_root, apply=False):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Vacía los datos operativos locales y conserva la cuenta "
-            f"administradora {ADMIN_USERNAME}."
+            "Vacía los datos de la antigua base SQLite local, no de Supabase, "
+            f"y conserva la cuenta administradora {ADMIN_USERNAME}."
         )
     )
     parser.add_argument(
