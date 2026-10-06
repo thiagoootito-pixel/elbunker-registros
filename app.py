@@ -1325,6 +1325,21 @@ st.markdown(
         overscroll-behavior: contain;
         box-sizing: border-box !important;
     }
+    @media (max-width: 640px) {
+        [data-testid="stPopoverBody"]:has([class*="_mes_calendario"])
+        [data-testid="stHorizontalBlock"]:not(:has([data-testid="stSelectbox"])) {
+            display: grid !important;
+            grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+            align-items: stretch !important;
+        }
+        [data-testid="stPopoverBody"]:has([class*="_mes_calendario"])
+        [data-testid="stHorizontalBlock"]:not(:has([data-testid="stSelectbox"]))
+        > [data-testid="column"] {
+            width: auto !important;
+            min-width: 0 !important;
+            max-width: none !important;
+        }
+    }
     [class*="_popover_calendario"] [data-testid="stPopoverButton"] {
         min-height: 40px !important;
         padding: 0.45rem 0.75rem !important;
@@ -1411,6 +1426,24 @@ st.markdown(
     body:has(#registros-theme-marker) [data-testid="stDataFrame"] canvas[style*="height: 36px"] {
         filter: sepia(1) saturate(6) hue-rotate(314deg) brightness(2.8);
     }
+    body:has(#registros-theme-marker)
+    [class*="st-key-tabla_admin_"] [data-testid="stDataFrame"],
+    body:has(#registros-theme-marker)
+    [class*="st-key-tabla_registros_supervisor"] [data-testid="stDataFrame"] {
+        position: relative !important;
+    }
+    body:has(#registros-theme-marker)
+    [class*="st-key-tabla_admin_"] [data-testid="stDataFrame"]::after,
+    body:has(#registros-theme-marker)
+    [class*="st-key-tabla_registros_supervisor"] [data-testid="stDataFrame"]::after {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto;
+        height: 36px;
+        z-index: 10;
+        pointer-events: auto;
+        background: transparent;
+    }
     """ + "</style>",
     unsafe_allow_html=True,
 )
@@ -1435,7 +1468,7 @@ st.markdown(
     body:has(#registros-theme-marker) [data-testid="stHeader"] {{
         position: fixed !important;
         top: 0 !important;
-        left: clamp(0px, 21.32vw, 21rem) !important;
+        left: 0 !important;
         right: 0 !important;
         width: auto !important;
         height: 38px !important;
@@ -1685,7 +1718,12 @@ def estilo_fila_tabla(fila, filas_seleccionadas):
 
     return estilos_celdas
 
-def crear_tabla_estilizada(df, filas_seleccionadas=None, incluir_usuario=False):
+def crear_tabla_estilizada(
+    df,
+    filas_seleccionadas=None,
+    incluir_usuario=False,
+    formatear_fecha_12h=False,
+):
     columnas_ocultas = ["ID"]
     if not incluir_usuario:
         columnas_ocultas.append("Registrado por")
@@ -1701,6 +1739,8 @@ def crear_tabla_estilizada(df, filas_seleccionadas=None, incluir_usuario=False):
             columna for columna in df_visual.columns if columna != "Registrado por"
         ]
         df_visual = df_visual[columnas]
+    if formatear_fecha_12h and "Fecha" in df_visual.columns:
+        df_visual["Fecha"] = df_visual["Fecha"].map(formatear_fecha_registro)
     filas_seleccionadas = filas_seleccionadas or set()
     return df_visual.style.apply(
         lambda fila: estilo_fila_tabla(fila, filas_seleccionadas), axis=1
@@ -1729,6 +1769,18 @@ def parsear_fecha(valor):
         except ValueError:
             continue
     return pd.NaT
+
+
+def formatear_fecha_registro(valor):
+    texto = str(valor).strip()
+    fecha = parsear_fecha(texto)
+    if pd.isna(fecha):
+        return texto
+    formato = "%Y-%m-%d"
+    if re.search(r"\d{1,2}:\d{2}", texto):
+        formato += " %I:%M:%S %p"
+    return fecha.strftime(formato)
+
 
 def filtrar_registros_por_fecha(df, fecha):
     if df.empty:
@@ -3644,8 +3696,17 @@ if is_admin:
 
     with st.container(border=True):
         evento_tabla = st.dataframe(
-            crear_tabla_estilizada(df_filtrado, filas_seleccionadas),
+            crear_tabla_estilizada(
+                df_filtrado,
+                filas_seleccionadas,
+                formatear_fecha_12h=True,
+            ),
             use_container_width=True,
+            column_order=[
+                columna
+                for columna in df_filtrado.columns
+                if columna not in {"ID", "Registrado por"}
+            ],
             selection_mode="single-row",
             on_select=guardar_seleccion_tabla,
             key=clave_tabla,
@@ -3680,9 +3741,18 @@ if is_admin:
 if not is_admin and not df_registros_fecha.empty:
     with st.container(border=True):
         st.dataframe(
-            crear_tabla_estilizada(df_registros_fecha),
+            crear_tabla_estilizada(
+                df_registros_fecha,
+                formatear_fecha_12h=True,
+            ),
             use_container_width=True,
+            column_order=[
+                columna
+                for columna in df_registros_fecha.columns
+                if columna not in {"ID", "Registrado por"}
+            ],
             hide_index=True,
+            key="tabla_registros_supervisor",
         )
 elif not is_admin:
     st.info(f"No hay registros para el {fecha_ver.strftime('%d/%m/%Y')}.")
