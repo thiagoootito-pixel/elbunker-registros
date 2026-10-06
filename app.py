@@ -31,6 +31,7 @@ from database import (
     guardar_usuarios_en_conexion,
     inicializar_base_datos,
     insertar_registro,
+    normalizar_usuarios,
 )
 
 
@@ -220,12 +221,13 @@ def _actualizar_usuarios_en_sesion(
 def guardar_usuarios(
     usuarios_actualizados, usuarios_eliminados_definitivamente=()
 ):
+    usuarios_normalizados = normalizar_usuarios(usuarios_actualizados)
     guardar_usuarios_en_db(
-        usuarios_actualizados,
+        usuarios_normalizados,
         usuarios_eliminados_definitivamente,
     )
     _actualizar_usuarios_en_sesion(
-        usuarios_actualizados, usuarios_eliminados_definitivamente
+        usuarios_normalizados, usuarios_eliminados_definitivamente
     )
 
 

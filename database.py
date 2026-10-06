@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 import hashlib
@@ -263,6 +264,34 @@ def consultar_usuarios_eliminados():
         return {fila[0].casefold() for fila in cursor.fetchall()}
 
 
+def normalizar_usuarios(usuarios):
+    if not isinstance(usuarios, Mapping):
+        raise ValueError("La lista de usuarios no tiene un formato válido.")
+
+    usuarios_normalizados = {}
+    for username, cuenta in usuarios.items():
+        if not isinstance(cuenta, Mapping):
+            raise ValueError(f"La cuenta {username!r} tiene un formato inválido.")
+
+        rol = cuenta.get("rol")
+        activo = cuenta.get("activo")
+        if not isinstance(rol, str) or not rol.strip():
+            raise ValueError(f"La cuenta {username!r} no tiene un rol válido.")
+        if not isinstance(activo, bool):
+            raise ValueError(f"La cuenta {username!r} no tiene un estado válido.")
+
+        usuarios_normalizados[username] = {
+            "contrasena": cuenta.get("contrasena"),
+            "contrasena_hash": cuenta.get("contrasena_hash"),
+            "salt": cuenta.get("salt"),
+            "rol": rol,
+            "ultimo_inicio_sesion": cuenta.get("ultimo_inicio_sesion"),
+            "activo": activo,
+            "predefinido": bool(cuenta.get("predefinido", False)),
+        }
+    return usuarios_normalizados
+
+
 def _credenciales_persistentes(cuenta):
     salt = cuenta.get("salt")
     password_hash = cuenta.get("contrasena_hash")
@@ -292,6 +321,7 @@ def _credenciales_persistentes(cuenta):
 def guardar_usuarios_en_conexion(
     conexion, usuarios, usuarios_eliminados_definitivamente=()
 ):
+    usuarios = normalizar_usuarios(usuarios)
     cursor = _ejecutar(conexion, "SELECT username FROM usuarios")
     existentes = {fila[0] for fila in cursor.fetchall()}
     deseados = set(usuarios)
@@ -332,11 +362,11 @@ def guardar_usuarios_en_conexion(
             (
                 username,
                 password_hash,
-                cuenta["rol"],
+                cuenta.get("rol"),
                 salt,
                 ultimo_inicio,
-                bool(cuenta["activo"]),
-                bool(cuenta.get("predefinido", False)),
+                cuenta.get("activo"),
+                cuenta.get("predefinido", False),
             ),
         )
 
