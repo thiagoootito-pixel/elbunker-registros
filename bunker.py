@@ -68,9 +68,30 @@ class App:
         self.mostrar_slots_gasto = False 
 
         # Cargar listas iniciales
-        self.lista_lavadores = self.cargar_lista(self.archivo_lavadores, ["Juan", "Pedro", "Carlos", "Luis"])
+        self.lista_lavadores = self.cargar_lista(
+            self.archivo_lavadores,
+            [
+                "Ismael", "Eymar", "Antony", "Anderson", "Alvaro",
+                "Jeferson", "Zara", "Dylan", "Wender", "Eduardo",
+                "Javier", "Eglimar", "Gabriel", "Jose", "Jose elis",
+                "Oscar", "Renzo", "Renzo V.", "Sergio", "Kelvin",
+                "Merwin", "William", "Pedro", "Felix", "Marco",
+            ],
+        )
         self.lista_vehiculos = self.cargar_lista(self.archivo_vehiculos, ["Sedán", "SUV", "Camioneta", "Moto"])
-        self.lista_servicios = self.cargar_lista(self.archivo_servicios, ["Lavado Básico", "Lavado Completo", "Encerado", "Motor"])
+        self.lista_servicios = self.cargar_lista(
+            self.archivo_servicios,
+            [
+                "Lavado Básico",
+                "Lavado Completo",
+                "Encerado",
+                "Motor",
+                "L. Basico+Pulido",
+                "L. Basico+Motor",
+                "L. Basico+Chasis,Motor,Cera",
+                "Tratamiento de cerámico",
+            ],
+        )
 
         # Caché de imágenes de botones
         self.imagenes_botones = {}

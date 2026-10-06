@@ -7,3 +7,7 @@ Pulido
 Lavado De Salon
 pintura completa
 Planchado
+L. Basico+Pulido
+L. Basico+Motor
+L. Basico+Chasis,Motor,Cera
+Tratamiento de cerámico

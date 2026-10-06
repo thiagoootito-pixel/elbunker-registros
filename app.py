@@ -2095,13 +2095,50 @@ def mostrar_notificacion_exito(destino=None):
 
 # Catálogos persistentes compartidos por el panel y el formulario
 lista_lavadores = cargar_catalogo(
-    ARCHIVO_LAVADORES, ["Carlos", "Junior", "Pedro", "Juan", "Jose"]
+    ARCHIVO_LAVADORES,
+    [
+        "Ismael",
+        "Eymar",
+        "Antony",
+        "Anderson",
+        "Alvaro",
+        "Jeferson",
+        "Zara",
+        "Dylan",
+        "Wender",
+        "Eduardo",
+        "Javier",
+        "Eglimar",
+        "Gabriel",
+        "Jose",
+        "Jose elis",
+        "Oscar",
+        "Renzo",
+        "Renzo V.",
+        "Sergio",
+        "Kelvin",
+        "Merwin",
+        "William",
+        "Pedro",
+        "Felix",
+        "Marco",
+    ],
 )
 lista_tipos = cargar_catalogo(
     ARCHIVO_VEHICULOS, ["Auto", "Moto", "Motaxi", "Camioneta", "Bicicleta"]
 )
 lista_servicios = cargar_catalogo(
-    ARCHIVO_SERVICIOS, ["Lavado Simple", "Lavado Completo", "Encerado", "Lavado De Salon"]
+    ARCHIVO_SERVICIOS,
+    [
+        "Lavado Simple",
+        "Lavado Completo",
+        "Encerado",
+        "Lavado De Salon",
+        "L. Basico+Pulido",
+        "L. Basico+Motor",
+        "L. Basico+Chasis,Motor,Cera",
+        "Tratamiento de cerámico",
+    ],
 )
 if not lista_tipos:
     lista_tipos = ["Auto"]
@@ -3681,7 +3718,12 @@ with st.container(border=True):
     with c2:
         st.text_input("Placa / Identificador", placeholder="Ej. ABC-123", key="input_placa")
     with c3:
-        st.selectbox("Servicio", lista_servicios, key="input_servicio")
+        st.selectbox(
+            "Servicio",
+            lista_servicios,
+            key="input_servicio",
+            accept_new_options=True,
+        )
     with c4:
         st.text_input("Monto Cobrado (S/)", key="input_monto")
     with c5:
@@ -3846,8 +3888,9 @@ if btn_guardar:
                 else:
                     st.error("No se encontró el registro a actualizar.")
         else:
-            fecha_actual = datetime.now(ZONA_HORARIA_PERU).strftime(
-                "%Y/%m/%d %H:%M"
+            ahora_registro = datetime.now(ZONA_HORARIA_PERU)
+            fecha_registro = (
+                f"{fecha_ver:%Y/%m/%d} {ahora_registro:%H:%M}"
             )
             nuevo_registro = {
                 "Tipo": st.session_state.input_tipo,
@@ -3855,7 +3898,7 @@ if btn_guardar:
                 "Servicio": st.session_state.input_servicio,
                 "Pago": st.session_state.input_pago,
                 "Monto": monto_fmt,
-                "Fecha": fecha_actual,
+                "Fecha": fecha_registro,
                 "Lavador 1": st.session_state.input_l1,
                 "Lavador 2": st.session_state.input_l2,
                 "Lavador 3": st.session_state.input_l3,
