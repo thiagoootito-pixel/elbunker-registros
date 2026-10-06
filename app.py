@@ -10,6 +10,7 @@ import unicodedata
 from datetime import date, datetime
 from html import escape
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import psycopg2
@@ -52,6 +53,7 @@ ROLES_USUARIO = ["Supervisor", "Administrador"]
 LOCALES = list(LOCALES_VALIDOS)
 FECHA_MINIMA_CALENDARIO = date(2026, 1, 1)
 FECHA_MAXIMA_CALENDARIO = date(2036, 12, 31)
+ZONA_HORARIA_PERU = ZoneInfo("America/Lima")
 
 
 def construir_titulo_seccion(seccion, local):
@@ -638,7 +640,9 @@ if not st.session_state.login_completado:
                     and cuenta["activo"]
                     and verificar_contrasena(cuenta, contrasena_login)
                 ):
-                    ultimo_inicio_sesion = datetime.now().astimezone().isoformat(
+                    ultimo_inicio_sesion = datetime.now(
+                        ZONA_HORARIA_PERU
+                    ).isoformat(
                         timespec="seconds"
                     )
                     try:
@@ -1865,7 +1869,7 @@ def filtrar_registros_por_mes(df, fecha):
     )
 
 def filtrar_registros_del_mes(df, ahora=None):
-    ahora = ahora or datetime.now()
+    ahora = ahora or datetime.now(ZONA_HORARIA_PERU)
     if df.empty:
         return df.copy()
 
@@ -1901,7 +1905,7 @@ def calcular_resumen_financiero(df, ahora=None):
         df_metricas["Monto_Num"].abs().where(tipo_gasto, 0.0),
     )
 
-    ahora = ahora or datetime.now()
+    ahora = ahora or datetime.now(ZONA_HORARIA_PERU)
     fechas = df_metricas["Fecha_Normalizada"]
     es_hoy = fechas.dt.date == ahora.date()
     es_mes_actual = (fechas.dt.year == ahora.year) & (fechas.dt.month == ahora.month)
@@ -2618,7 +2622,7 @@ def mostrar_confirmacion_eliminar_supervisor(nombre):
 
 if seccion == "Finanzas":
     st.title(construir_titulo_seccion(seccion, local_activo))
-    ahora_finanzas = datetime.now()
+    ahora_finanzas = datetime.now(ZONA_HORARIA_PERU)
     nombres_meses_finanzas = [
         "Enero",
         "Febrero",
@@ -3248,7 +3252,7 @@ if seccion == "Control":
         fecha_registros_ajustes = seleccionar_fecha(
             "Fecha" if is_supervisor else "Ver Fecha",
             "fecha_registros_ajustes",
-            datetime.now().date(),
+            datetime.now(ZONA_HORARIA_PERU).date(),
         )
     with col_periodo_ajustes:
         periodo_ajustes = st.selectbox(
@@ -3428,7 +3432,7 @@ if seccion == "Control":
         )
         st.stop()
 
-    ahora_ajustes = datetime.now()
+    ahora_ajustes = datetime.now(ZONA_HORARIA_PERU)
     registros_mes = filtrar_registros_del_mes(df_registros, ahora_ajustes)
     registros_dia = filtrar_registros_por_fecha(
         df_registros, fecha_registros_ajustes
@@ -3636,7 +3640,7 @@ with st.container(key="registros_hero"):
         fecha_ver = seleccionar_fecha(
             "Ver Fecha",
             "ver_fecha_registros",
-            datetime.now().date(),
+            datetime.now(ZONA_HORARIA_PERU).date(),
             on_change=cambiar_fecha_tabla,
         )
     if is_admin:
@@ -3981,7 +3985,9 @@ if btn_guardar:
                     else:
                         st.error("No se encontró el registro a actualizar.")
         else:
-            fecha_actual = datetime.now().strftime("%Y/%m/%d %H:%M")
+            fecha_actual = datetime.now(ZONA_HORARIA_PERU).strftime(
+                "%Y/%m/%d %H:%M"
+            )
             nuevo_registro = {
                 "Tipo": st.session_state.input_tipo,
                 "Placa": st.session_state.input_placa.upper(),
