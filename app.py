@@ -1547,7 +1547,8 @@ def _obtener_registros_sesion(forzar_recarga=False):
         or st.session_state.get("_alcance_registros_sesion") != alcance
         or "_registros_sesion" not in st.session_state
     ):
-        filas = consultar_registros()
+        supervisor = nombre_usuario if rol == "Supervisor" else None
+        filas = consultar_registros(supervisor=supervisor)
         df = pd.DataFrame.from_records(
             filas,
             columns=COLUMNAS_REGISTRO.values(),
