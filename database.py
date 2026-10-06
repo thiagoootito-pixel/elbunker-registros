@@ -7,8 +7,6 @@ import psycopg2
 import streamlit as st
 
 
-LOCALES_VALIDOS = ("Búnker 1", "Búnker 2", "Búnker 3")
-LOCAL_GLOBAL = "Todos los locales"
 USUARIOS_PREDEFINIDOS = frozenset({"Titovallejo"})
 ITERACIONES_HASH_CONTRASENA = 600_000
 
@@ -35,15 +33,23 @@ COLUMNAS_REGISTRO = {
 }
 
 _FORMATOS_FECHA = (
+    "%Y/%m/%d %I:%M:%S %p",
+    "%Y/%m/%d %I:%M %p",
     "%Y/%m/%d %H:%M:%S",
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
+    "%d/%m/%Y %I:%M:%S %p",
+    "%d/%m/%Y %I:%M %p",
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
     "%d/%m/%Y",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %I:%M %p",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d",
+    "%d-%m-%Y %I:%M:%S %p",
+    "%d-%m-%Y %I:%M %p",
     "%d-%m-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M",
     "%d-%m-%Y",
@@ -138,7 +144,6 @@ def inicializar_base_datos():
                 salt TEXT NOT NULL,
                 last_login TIMESTAMPTZ,
                 active BOOLEAN NOT NULL DEFAULT TRUE,
-                local TEXT NOT NULL DEFAULT 'Todos los locales',
                 predefinido BOOLEAN NOT NULL DEFAULT FALSE
             )
             """,
@@ -181,12 +186,9 @@ def inicializar_base_datos():
         )
 
 
-def consultar_registros(local=None, fecha=None, mes=None, supervisor=None):
+def consultar_registros(fecha=None, mes=None, supervisor=None):
     condiciones = []
     parametros = []
-    if local and local != "Todos los locales":
-        condiciones.append("local = %s")
-        parametros.append(local)
     if fecha is not None:
         siguiente_dia = fecha + timedelta(days=1)
         condiciones.extend(("fecha >= %s", "fecha < %s"))
@@ -223,7 +225,7 @@ def consultar_usuarios():
             conexion,
             """
             SELECT username, password, role, salt, last_login,
-                   active, local, predefinido
+                   active, predefinido
             FROM usuarios
             ORDER BY username
             """,
@@ -236,7 +238,6 @@ def consultar_usuarios():
             salt,
             last_login,
             active,
-            local,
             predefinido,
         ) in cursor.fetchall():
             if isinstance(last_login, datetime):
@@ -248,7 +249,6 @@ def consultar_usuarios():
                 "rol": role,
                 "ultimo_inicio_sesion": last_login,
                 "activo": active,
-                "local": local,
                 "predefinido": predefinido,
             }
         return usuarios
@@ -317,9 +317,9 @@ def guardar_usuarios_en_conexion(
             """
             INSERT INTO usuarios (
                 username, password, role, salt, last_login,
-                active, local, predefinido
+                active, predefinido
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (username) DO UPDATE SET
                 username = EXCLUDED.username,
                 password = EXCLUDED.password,
@@ -327,7 +327,6 @@ def guardar_usuarios_en_conexion(
                 salt = EXCLUDED.salt,
                 last_login = EXCLUDED.last_login,
                 active = EXCLUDED.active,
-                local = EXCLUDED.local,
                 predefinido = EXCLUDED.predefinido
             """,
             (
@@ -337,7 +336,6 @@ def guardar_usuarios_en_conexion(
                 salt,
                 ultimo_inicio,
                 bool(cuenta["activo"]),
-                cuenta["local"],
                 bool(cuenta.get("predefinido", False)),
             ),
         )
@@ -396,7 +394,7 @@ def insertar_registro(registro):
     return registro_id
 
 
-def actualizar_registro(registro_id, local, cambios):
+def actualizar_registro(registro_id, cambios):
     campos = [
         nombre
         for nombre in cambios
@@ -416,19 +414,19 @@ def actualizar_registro(registro_id, local, cambios):
     with conectar() as conexion:
         cursor = _ejecutar(
             conexion,
-            f"UPDATE registros SET {asignaciones} WHERE id = %s AND local = %s",
-            (*valores, int(registro_id), local),
+            f"UPDATE registros SET {asignaciones} WHERE id = %s",
+            (*valores, int(registro_id)),
         )
         actualizado = cursor.rowcount == 1
     return actualizado
 
 
-def eliminar_registro(registro_id, local):
+def eliminar_registro(registro_id):
     with conectar() as conexion:
         cursor = _ejecutar(
             conexion,
-            "DELETE FROM registros WHERE id = %s AND local = %s",
-            (int(registro_id), local),
+            "DELETE FROM registros WHERE id = %s",
+            (int(registro_id),),
         )
         eliminado = cursor.rowcount == 1
     return eliminado

@@ -18,8 +18,6 @@ import streamlit as st
 from database import (
     COLUMNAS_REGISTRO,
     ITERACIONES_HASH_CONTRASENA,
-    LOCAL_GLOBAL,
-    LOCALES_VALIDOS,
     USUARIOS_PREDEFINIDOS,
     actualizar_registro,
     actualizar_ultimo_inicio_sesion,
@@ -50,14 +48,13 @@ with open(os.path.join(os.path.dirname(__file__), "banner_bunker.png"), "rb") as
     banner_base64 = base64.b64encode(archivo_banner.read()).decode("ascii")
 
 ROLES_USUARIO = ["Supervisor", "Administrador"]
-LOCALES = list(LOCALES_VALIDOS)
 FECHA_MINIMA_CALENDARIO = date(2026, 1, 1)
 FECHA_MAXIMA_CALENDARIO = date(2036, 12, 31)
 ZONA_HORARIA_PERU = ZoneInfo("America/Lima")
 
 
-def construir_titulo_seccion(seccion, local):
-    texto = unicodedata.normalize("NFKD", f"{seccion} - {local}")
+def construir_titulo_seccion(seccion):
+    texto = unicodedata.normalize("NFKD", f"{seccion} - BUNKER")
     return texto.encode("ascii", "ignore").decode("ascii").upper()
 
 
@@ -242,17 +239,6 @@ def mostrar_formulario_nuevo_usuario():
             "Confirmar contraseña", type="password"
         )
         nuevo_rol = st.selectbox("Rol", ROLES_USUARIO)
-        opciones_local_nuevo = [LOCAL_GLOBAL, *LOCALES]
-        nuevo_local = st.selectbox(
-            "Local",
-            opciones_local_nuevo,
-            index=(
-                0
-                if nuevo_rol == "Administrador"
-                else opciones_local_nuevo.index(LOCALES[0])
-            ),
-            disabled=nuevo_rol == "Administrador",
-        )
         guardar_nuevo_usuario = st.form_submit_button(
             "Guardar y agregar usuario",
             type="primary",
@@ -292,11 +278,6 @@ def mostrar_formulario_nuevo_usuario():
             "rol": nuevo_rol,
             "ultimo_inicio_sesion": None,
             "activo": True,
-            "local": (
-                LOCAL_GLOBAL
-                if nuevo_rol == "Administrador"
-                else nuevo_local
-            ),
             "predefinido": False,
         }
         usuarios_actualizados = dict(usuarios)
@@ -344,23 +325,6 @@ def mostrar_formulario_editar_usuario():
         ),
         key=f"rol_editar_usuario_{clave_usuario}",
     )
-    opciones_local = (
-        [LOCAL_GLOBAL, *LOCALES]
-        if rol_elegido == "Administrador"
-        else LOCALES
-    )
-    local_actual = cuenta_seleccionada["local"]
-    local_elegido = st.selectbox(
-        "Local",
-        opciones_local,
-        index=(
-            opciones_local.index(local_actual)
-            if local_actual in opciones_local
-            else 0
-        ),
-        disabled=rol_elegido == "Administrador",
-        key=f"local_editar_usuario_{clave_usuario}",
-    )
     guardar_cambios = st.button(
         "Guardar cambios",
         type="primary",
@@ -373,9 +337,6 @@ def mostrar_formulario_editar_usuario():
         nombre: cuenta.copy() for nombre, cuenta in usuarios.items()
     }
     usuarios_actualizados[usuario_seleccionado]["rol"] = rol_elegido
-    usuarios_actualizados[usuario_seleccionado]["local"] = (
-        LOCAL_GLOBAL if rol_elegido == "Administrador" else local_elegido
-    )
     try:
         guardar_usuarios(
             usuarios_actualizados,
@@ -667,16 +628,6 @@ if not st.session_state.login_completado:
                         st.session_state.admin_autorizado = (
                             cuenta["rol"] == "Administrador"
                         )
-                        st.session_state.local_registros = (
-                            LOCALES[0]
-                            if cuenta["rol"] == "Administrador"
-                            else cuenta["local"]
-                        )
-                        st.session_state.ver_todos_los_locales = False
-                        st.session_state.selector_local_registros = (
-                            st.session_state.local_registros
-                        )
-                        st.session_state.selector_ver_todos_los_locales = False
                         st.rerun()
                 else:
                     st.error("ACCESO DENEGADO: usuario o contraseña incorrectos.")
@@ -698,11 +649,6 @@ if st.session_state.login_completado:
     st.session_state.admin_autorizado = (
         cuenta_actual["rol"] == "Administrador"
     )
-    if cuenta_actual["rol"] == "Supervisor":
-        st.session_state.local_registros = cuenta_actual["local"]
-        st.session_state.ver_todos_los_locales = False
-        st.session_state.selector_local_registros = cuenta_actual["local"]
-        st.session_state.selector_ver_todos_los_locales = False
 
 st.markdown(
     f'<style data-style-revision="{os.stat(__file__).st_mtime_ns}">'
@@ -1279,16 +1225,6 @@ st.markdown(
         color: #111 !important;
         border-radius: 6px;
     }
-    .st-key-selector_local_registros [role="group"] {
-        transform: translateY(-3px);
-    }
-    .st-key-selector_local_registros [data-testid="stWidgetLabel"] {
-        color: #f1f5ef !important;
-    }
-    .st-key-selector_local_registros [data-testid="stWidgetLabel"] p {
-        color: #f1f5ef !important;
-        -webkit-text-fill-color: #f1f5ef !important;
-    }
     [data-testid="stSelectbox"] [role="combobox"],
     [data-testid="stSelectbox"] input,
     [data-testid="stMultiSelect"] [role="combobox"],
@@ -1539,17 +1475,17 @@ USUARIOS_SUPERVISORES = sorted(
 COLUMNAS_VALIDAS = [
     "ID", "Tipo", "Placa", "Servicio", "Pago", "Monto", "Fecha",
     "Lavador 1", "Lavador 2", "Lavador 3", "Motivo Gasto",
-    "Precio Gasto", "Método Gasto", NOMBRE_COLUMNA_LOCAL,
+    "Precio Gasto", "Método Gasto",
     *COLUMNAS_CLIENTE, "Registrado por",
 ]
 COLUMNAS_EXPORTACION = [
-    (NOMBRE_COLUMNA_LOCAL, "LOCAL"),
     ("Tipo", "TIPO"),
     ("Placa", "PLACA"),
     ("Servicio", "SERVICIO"),
     ("Pago", "PAGO"),
     ("Monto", "MONTO"),
     ("Fecha", "FECHA"),
+    ("Hora", "HORA"),
     ("Lavador 1", "LAVADOR 1"),
     ("Lavador 2", "LAVADOR 2"),
     ("Lavador 3", "LAVADOR 3"),
@@ -1573,10 +1509,8 @@ def guardar_catalogo(archivo, valores):
     with open(archivo, "w", encoding="utf-8") as catalogo:
         catalogo.write("\n".join(valores) + "\n")
 
-def consultar_dataframe(local=None, fecha=None, supervisor=None, mes=None):
+def consultar_dataframe(fecha=None, supervisor=None, mes=None):
     df = _obtener_registros_sesion()
-    if local and local not in {LOCAL_GLOBAL, "Todos los locales"}:
-        df = df.loc[df["Local"].astype(str) == str(local)]
     if fecha is not None and not df.empty:
         fechas = df["Fecha"].map(parsear_fecha)
         df = df.loc[
@@ -1605,22 +1539,13 @@ def _obtener_registros_sesion(forzar_recarga=False):
     nombre_usuario = st.session_state.get("usuario_actual")
     cuenta = usuarios.get(nombre_usuario, {})
     rol = cuenta.get("rol", st.session_state.get("rol_usuario", ""))
-    if rol == "Administrador":
-        local_alcance = None
-    else:
-        local_alcance = cuenta.get("local")
-        if local_alcance not in LOCALES:
-            raise ValueError(
-                "La cuenta no tiene un local válido para consultar registros."
-            )
-
-    alcance = (nombre_usuario, rol, local_alcance)
+    alcance = (nombre_usuario, rol)
     if (
         forzar_recarga
         or st.session_state.get("_alcance_registros_sesion") != alcance
         or "_registros_sesion" not in st.session_state
     ):
-        filas = consultar_registros(local=local_alcance)
+        filas = consultar_registros()
         df = pd.DataFrame.from_records(
             filas,
             columns=COLUMNAS_REGISTRO.values(),
@@ -1726,7 +1651,6 @@ def crear_tabla_estilizada(
     df,
     filas_seleccionadas=None,
     incluir_usuario=False,
-    formatear_fecha_12h=False,
 ):
     columnas_ocultas = ["ID"]
     if not incluir_usuario:
@@ -1743,12 +1667,31 @@ def crear_tabla_estilizada(
             columna for columna in df_visual.columns if columna != "Registrado por"
         ]
         df_visual = df_visual[columnas]
-    if formatear_fecha_12h and "Fecha" in df_visual.columns:
-        df_visual["Fecha"] = df_visual["Fecha"].map(formatear_fecha_registro)
+    if "Fecha" in df_visual.columns:
+        fechas_separadas = df_visual["Fecha"].map(separar_fecha_hora_registro)
+        posicion_hora = df_visual.columns.get_loc("Fecha") + 1
+        df_visual["Fecha"] = fechas_separadas.map(lambda valor: valor[0])
+        df_visual.insert(
+            posicion_hora,
+            "Hora",
+            fechas_separadas.map(lambda valor: valor[1]),
+        )
     filas_seleccionadas = filas_seleccionadas or set()
     return df_visual.style.apply(
         lambda fila: estilo_fila_tabla(fila, filas_seleccionadas), axis=1
     )
+
+
+def obtener_columnas_visibles_registros(df):
+    columnas = [
+        columna
+        for columna in df.columns
+        if columna not in {"ID", "Registrado por"}
+    ]
+    if "Fecha" in columnas:
+        columnas.insert(columnas.index("Fecha") + 1, "Hora")
+    return columnas
+
 
 def guardar_seleccion_tabla():
     clave_tabla = st.session_state.get("tabla_admin_key_activa", "tabla_admin")
@@ -1762,9 +1705,13 @@ def parsear_fecha(valor):
 
     texto = str(valor).strip()
     formatos = [
+        "%Y/%m/%d %I:%M:%S %p", "%Y/%m/%d %I:%M %p",
         "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+        "%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M %p",
         "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+        "%Y-%m-%d %I:%M:%S %p", "%Y-%m-%d %I:%M %p",
         "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%d-%m-%Y %I:%M:%S %p", "%d-%m-%Y %I:%M %p",
         "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y",
     ]
     for formato in formatos:
@@ -1775,15 +1722,17 @@ def parsear_fecha(valor):
     return pd.NaT
 
 
-def formatear_fecha_registro(valor):
+def separar_fecha_hora_registro(valor):
     texto = str(valor).strip()
     fecha = parsear_fecha(texto)
     if pd.isna(fecha):
-        return texto
-    formato = "%Y-%m-%d"
-    if re.search(r"\d{1,2}:\d{2}", texto):
-        formato += " %I:%M:%S %p"
-    return fecha.strftime(formato)
+        return texto, "-"
+    hora = (
+        fecha.strftime("%I:%M:%S %p")
+        if re.search(r"\d{1,2}:\d{2}", texto)
+        else "-"
+    )
+    return fecha.strftime("%Y-%m-%d"), hora
 
 
 def filtrar_registros_por_fecha(df, fecha):
@@ -2016,15 +1965,10 @@ def generar_excel_registros(df):
         columns=[columna for columna, _ in COLUMNAS_EXPORTACION],
         fill_value="-",
     ).copy()
+    fechas_separadas = df_exportacion["Fecha"].map(separar_fecha_hora_registro)
+    df_exportacion["Fecha"] = fechas_separadas.map(lambda valor: valor[0])
+    df_exportacion["Hora"] = fechas_separadas.map(lambda valor: valor[1])
     df_exportacion.columns = [titulo for _, titulo in COLUMNAS_EXPORTACION]
-    columna_local = dict(COLUMNAS_EXPORTACION)[NOMBRE_COLUMNA_LOCAL]
-    df_exportacion[columna_local] = (
-        df_exportacion[columna_local]
-        .fillna("-")
-        .astype(str)
-        .str.strip()
-        .replace("", "-")
-    )
 
     for columna in ("MONTO", "PRECIO GASTO"):
         df_exportacion[columna] = df_exportacion[columna].map(
@@ -2059,7 +2003,13 @@ def generar_excel_registros(df):
                 if celda.row > 1:
                     celda.alignment = Alignment(vertical="center")
 
-        for numero_columna in (5, 10):
+        columnas_moneda = {
+            hoja.cell(row=1, column=numero_columna).value: numero_columna
+            for numero_columna in range(1, hoja.max_column + 1)
+            if hoja.cell(row=1, column=numero_columna).value
+            in {"MONTO", "PRECIO GASTO"}
+        }
+        for numero_columna in columnas_moneda.values():
             for fila in range(2, hoja.max_row + 1):
                 celda = hoja.cell(row=fila, column=numero_columna)
                 if isinstance(celda.value, (int, float)):
@@ -2067,11 +2017,15 @@ def generar_excel_registros(df):
 
         for celdas_columna in hoja.columns:
             letra_columna = celdas_columna[0].column_letter
+            numero_columna = celdas_columna[0].column
             longitud_maxima = 0
             for celda in celdas_columna:
                 if celda.value is None:
                     continue
-                if celda.column in (5, 10) and isinstance(celda.value, (int, float)):
+                if (
+                    numero_columna in columnas_moneda.values()
+                    and isinstance(celda.value, (int, float))
+                ):
                     texto = f"S/ {celda.value:,.2f}"
                 else:
                     texto = str(celda.value)
@@ -2259,7 +2213,6 @@ l2_opts = ["-", *lista_lavadores]
 l3_opts = ["-", *lista_lavadores]
 
 if "edit_id" not in st.session_state: st.session_state.edit_id = None
-if "edit_local" not in st.session_state: st.session_state.edit_local = None
 if "registro_cargado_id" not in st.session_state: st.session_state.registro_cargado_id = None
 if "revision_tabla_fecha" not in st.session_state: st.session_state.revision_tabla_fecha = 0
 if "input_tipo" not in st.session_state: st.session_state.input_tipo = "Auto"
@@ -2321,27 +2274,14 @@ if st.session_state.pop("resetear_formulario", False):
 
 def limpiar_formulario():
     st.session_state.edit_id = None
-    st.session_state.edit_local = None
     st.session_state.resetear_formulario = True
 
 def cambiar_fecha_tabla():
     st.session_state.revision_tabla_fecha += 1
     if st.session_state.edit_id:
         st.session_state.edit_id = None
-        st.session_state.edit_local = None
         st.session_state.registro_cargado_id = None
         st.session_state.resetear_formulario = True
-
-def cambiar_local_tabla():
-    st.session_state.local_registros = st.session_state.selector_local_registros
-    st.session_state.ver_todos_los_locales = (
-        st.session_state.selector_ver_todos_los_locales
-    )
-    st.session_state.revision_tabla_fecha += 1
-    st.session_state.edit_id = None
-    st.session_state.edit_local = None
-    st.session_state.registro_cargado_id = None
-    st.session_state.resetear_formulario = True
 
 def cargar_fila_en_formulario(fila_data):
     registro_id = str(fila_data['ID'])
@@ -2350,7 +2290,6 @@ def cargar_fila_en_formulario(fila_data):
 
     st.session_state.registro_cargado_id = registro_id
     st.session_state.edit_id = registro_id
-    st.session_state.edit_local = fila_data[NOMBRE_COLUMNA_LOCAL]
     st.session_state.input_tipo = fila_data['Tipo'] if fila_data['Tipo'] in lista_tipos else lista_tipos[0]
     st.session_state.input_placa = str(fila_data['Placa'])
     st.session_state.input_servicio = fila_data['Servicio'] if fila_data['Servicio'] in lista_servicios else lista_servicios[0]
@@ -2455,40 +2394,12 @@ is_admin = st.session_state.admin_autorizado
 is_supervisor = str(st.session_state.get("rol_usuario", "")).startswith(
     "Supervisor"
 )
-if is_admin:
-    local_guardado = st.session_state.get("local_registros", LOCALES[0])
-    if local_guardado not in LOCALES:
-        local_guardado = LOCALES[0]
-        st.session_state.local_registros = local_guardado
-    ver_todos_los_locales = bool(
-        st.session_state.get("ver_todos_los_locales", False)
-    )
-    st.session_state.selector_local_registros = local_guardado
-    st.session_state.selector_ver_todos_los_locales = ver_todos_los_locales
-    local_activo = (
-        LOCAL_GLOBAL if ver_todos_los_locales else local_guardado
-    )
-else:
-    local_activo = usuarios[st.session_state.usuario_actual]["local"]
-    st.session_state.local_registros = local_activo
-    st.session_state.ver_todos_los_locales = False
-    st.session_state.selector_local_registros = local_activo
-    st.session_state.selector_ver_todos_los_locales = False
-
-df_registros = (
-    consultar_dataframe(
-        local=None if local_activo == LOCAL_GLOBAL else local_activo
-    )
-)
+df_registros = consultar_dataframe()
 USUARIOS_SUPERVISORES = sorted(
     nombre
     for nombre, cuenta in usuarios.items()
     if cuenta["activo"]
     and cuenta["rol"] == "Supervisor"
-    and (
-        local_activo == LOCAL_GLOBAL
-        or cuenta["local"] == local_activo
-    )
 )
 
 def mostrar_menu_usuario():
@@ -2556,7 +2467,7 @@ if (
     and not is_admin
     and not (seccion in {"Gestión", "Control"} and is_supervisor)
 ):
-    st.title(construir_titulo_seccion(seccion, local_activo))
+    st.title(construir_titulo_seccion(seccion))
     st.error("Acceso restringido. Se requiere una cuenta de Administrador.")
     st.stop()
 
@@ -2621,7 +2532,7 @@ def mostrar_confirmacion_eliminar_supervisor(nombre):
         st.rerun()
 
 if seccion == "Finanzas":
-    st.title(construir_titulo_seccion(seccion, local_activo))
+    st.title(construir_titulo_seccion(seccion))
     ahora_finanzas = datetime.now(ZONA_HORARIA_PERU)
     nombres_meses_finanzas = [
         "Enero",
@@ -2896,7 +2807,6 @@ if seccion == "Finanzas":
             )
 
         registros_supervisor_detalle = consultar_dataframe(
-            local=None if local_activo == LOCAL_GLOBAL else local_activo,
             supervisor=supervisor_detalle,
         )
         if periodo_detalle_finanzas == "Día":
@@ -2973,7 +2883,7 @@ if seccion == "Finanzas":
     st.stop()
 
 if seccion == "Gestión":
-    st.title(construir_titulo_seccion(seccion, local_activo))
+    st.title(construir_titulo_seccion(seccion))
     st.caption("Administra el personal, los tipos de vehículos y los servicios disponibles.")
     st.markdown(
         """
@@ -3233,7 +3143,7 @@ if seccion == "Gestión":
     st.stop()
 
 if seccion == "Control":
-    st.title(construir_titulo_seccion(seccion, local_activo))
+    st.title(construir_titulo_seccion(seccion))
     st.markdown("---")
     st.subheader(
         "Registro de Servicios y Gastos - Supervisor"
@@ -3273,7 +3183,6 @@ if seccion == "Control":
         )
         registros_supervisor_ajustes = (
             consultar_dataframe(
-                local=None if local_activo == LOCAL_GLOBAL else local_activo,
                 fecha=fecha_registros_ajustes,
                 supervisor=st.session_state.usuario_actual,
             )
@@ -3286,7 +3195,6 @@ if seccion == "Control":
         )
         registros_supervisor_ajustes = (
             consultar_dataframe(
-                local=None if local_activo == LOCAL_GLOBAL else local_activo,
                 mes=fecha_registros_ajustes,
                 supervisor=st.session_state.usuario_actual,
             )
@@ -3524,7 +3432,6 @@ if seccion == "Control":
                 {
                     "Nombre de usuario": nombre,
                     "Rol": cuenta["rol"],
-                    NOMBRE_COLUMNA_LOCAL: cuenta["local"],
                     "Último inicio de sesión": (
                         datetime.fromisoformat(cuenta["ultimo_inicio_sesion"]).strftime(
                             "%d/%m/%Y %H:%M"
@@ -3634,7 +3541,7 @@ with st.container(key="registros_hero"):
             f'<div class="main-header-logo"><img src="data:image/png;base64,{logo_base64}" alt="The Bunker Car Wash"></div>',
             unsafe_allow_html=True,
         )
-    columnas_banner = st.columns([1, 1, 2] if is_admin else [1, 3])
+    columnas_banner = st.columns([1, 3])
     col_fecha = columnas_banner[0]
     with col_fecha:
         fecha_ver = seleccionar_fecha(
@@ -3643,32 +3550,11 @@ with st.container(key="registros_hero"):
             datetime.now(ZONA_HORARIA_PERU).date(),
             on_change=cambiar_fecha_tabla,
         )
-    if is_admin:
-        with columnas_banner[1]:
-            st.selectbox(
-                "Local",
-                LOCALES,
-                key="selector_local_registros",
-                on_change=cambiar_local_tabla,
-            )
-            st.checkbox(
-                "Vista global (todos los locales)",
-                key="selector_ver_todos_los_locales",
-                on_change=cambiar_local_tabla,
-            )
-
-    etiqueta_local = (
-        LOCAL_GLOBAL
-        if is_admin and st.session_state.get("ver_todos_los_locales", False)
-        else st.session_state.local_registros
-    )
-
-st.title(construir_titulo_seccion("Registros", etiqueta_local))
+st.title(construir_titulo_seccion("Registros"))
 st.caption(f"Fecha: {fecha_ver.strftime('%d/%m/%Y')}")
 
 # --- TABLA DE REGISTROS (PROCESADA PRIMERO PARA CARGAR LA SELECCIÓN) ---
 df_registros_fecha = consultar_dataframe(
-    local=None if local_activo == LOCAL_GLOBAL else local_activo,
     fecha=fecha_ver,
 )
 df_filtrado = df_registros_fecha.copy()
@@ -3703,14 +3589,9 @@ if is_admin:
             crear_tabla_estilizada(
                 df_filtrado,
                 filas_seleccionadas,
-                formatear_fecha_12h=True,
             ),
             use_container_width=True,
-            column_order=[
-                columna
-                for columna in df_filtrado.columns
-                if columna not in {"ID", "Registrado por"}
-            ],
+            column_order=obtener_columnas_visibles_registros(df_filtrado),
             selection_mode="single-row",
             on_select=guardar_seleccion_tabla,
             key=clave_tabla,
@@ -3730,7 +3611,6 @@ if is_admin:
             cargar_fila_en_formulario(fila_data)
     elif st.session_state.edit_id:
         st.session_state.edit_id = None
-        st.session_state.edit_local = None
         st.session_state.registro_cargado_id = None
         restablecer_campos_formulario()
     else:
@@ -3747,14 +3627,11 @@ if not is_admin and not df_registros_fecha.empty:
         st.dataframe(
             crear_tabla_estilizada(
                 df_registros_fecha,
-                formatear_fecha_12h=True,
             ),
             use_container_width=True,
-            column_order=[
-                columna
-                for columna in df_registros_fecha.columns
-                if columna not in {"ID", "Registrado por"}
-            ],
+            column_order=obtener_columnas_visibles_registros(
+                df_registros_fecha
+            ),
             hide_index=True,
             key="tabla_registros_supervisor",
         )
@@ -3765,8 +3642,7 @@ st.download_button(
     "Exportar a Excel",
     data=generar_excel_registros(df_exportacion),
     file_name=(
-        f"registros_{fecha_ver.strftime('%Y-%m-%d')}_"
-        f"{'todos' if local_activo == LOCAL_GLOBAL else local_activo.lower().replace(' ', '_')}.xlsx"
+        f"registros_{fecha_ver.strftime('%Y-%m-%d')}_bunker.xlsx"
     ),
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     key="descargar_registros_excel",
@@ -3932,58 +3808,40 @@ if btn_guardar:
         )
         
         if st.session_state.edit_id:
-            if (
-                not is_admin
-                and st.session_state.edit_local != local_activo
-            ):
-                st.error("No tienes permiso para modificar registros de otro local.")
+            cambios_registro = {
+                "Tipo": st.session_state.input_tipo,
+                "Placa": st.session_state.input_placa.upper(),
+                "Servicio": st.session_state.input_servicio,
+                "Pago": st.session_state.input_pago,
+                "Monto": monto_fmt,
+                "Lavador 1": lavador_1 or "-",
+                "Lavador 2": lavador_2 or "-",
+                "Lavador 3": lavador_3 or "-",
+                "Motivo Gasto": st.session_state.input_motivo.strip() or "-",
+                "Precio Gasto": gasto_fmt,
+                "Método Gasto": st.session_state.input_metodo_gasto or "-",
+                "RUC/DNI": st.session_state.input_ruc_cliente.strip() or "-",
+                "Razón Social/Nombre": (
+                    st.session_state.input_razon_social_cliente.strip() or "-"
+                ),
+                "Número Cliente": st.session_state.input_numero_cliente.strip() or "-",
+                "Correo Cliente": st.session_state.input_correo_cliente.strip() or "-",
+            }
+            try:
+                actualizado = actualizar_registro(
+                    st.session_state.edit_id,
+                    cambios_registro,
+                )
+            except (psycopg2.Error, ValueError) as error:
+                st.error(f"No se pudo actualizar el registro: {error}")
             else:
-                cambios_registro = {
-                    "Tipo": st.session_state.input_tipo,
-                    "Placa": st.session_state.input_placa.upper(),
-                    "Servicio": st.session_state.input_servicio,
-                    "Pago": st.session_state.input_pago,
-                    "Monto": monto_fmt,
-                    "Lavador 1": lavador_1 or "-",
-                    "Lavador 2": lavador_2 or "-",
-                    "Lavador 3": lavador_3 or "-",
-                    "Motivo Gasto": (
-                        st.session_state.input_motivo.strip() or "-"
-                    ),
-                    "Precio Gasto": gasto_fmt,
-                    "Método Gasto": (
-                        st.session_state.input_metodo_gasto or "-"
-                    ),
-                    "RUC/DNI": (
-                        st.session_state.input_ruc_cliente.strip() or "-"
-                    ),
-                    "Razón Social/Nombre": (
-                        st.session_state.input_razon_social_cliente.strip()
-                        or "-"
-                    ),
-                    "Número Cliente": (
-                        st.session_state.input_numero_cliente.strip() or "-"
-                    ),
-                    "Correo Cliente": (
-                        st.session_state.input_correo_cliente.strip() or "-"
-                    ),
-                }
-                try:
-                    actualizado = actualizar_registro(
-                        st.session_state.edit_id,
-                        st.session_state.edit_local,
-                        cambios_registro,
-                    )
-                except (psycopg2.Error, ValueError) as error:
-                    st.error(f"No se pudo actualizar el registro: {error}")
+                if actualizado:
+                    refrescar_registros_sesion()
+                    limpiar_formulario()
+                    notificar_exito("¡Se actualizó correctamente!")
+                    st.rerun()
                 else:
-                    if actualizado:
-                        refrescar_registros_sesion()
-                        limpiar_formulario()
-                        notificar_exito("¡Se actualizó correctamente!")
-                        st.rerun()
-                    else:
-                        st.error("No se encontró el registro a actualizar.")
+                    st.error("No se encontró el registro a actualizar.")
         else:
             fecha_actual = datetime.now(ZONA_HORARIA_PERU).strftime(
                 "%Y/%m/%d %H:%M"
@@ -4001,11 +3859,7 @@ if btn_guardar:
                 "Motivo Gasto": st.session_state.input_motivo.strip() or "-",
                 "Precio Gasto": gasto_fmt,
                 "Método Gasto": st.session_state.input_metodo_gasto or "-",
-                NOMBRE_COLUMNA_LOCAL: (
-                    st.session_state.local_registros
-                    if is_admin
-                    else local_activo
-                ),
+                NOMBRE_COLUMNA_LOCAL: "Búnker 1",
                 "RUC/DNI": (
                     st.session_state.input_ruc_cliente.strip() or "-"
                 ),
@@ -4037,23 +3891,17 @@ if btn_guardar:
         st.warning("Por favor, ingresa al menos la placa o identificador.")
 
 if btn_eliminar and st.session_state.edit_id:
-    if not is_admin and st.session_state.edit_local != local_activo:
-        st.error("No tienes permiso para eliminar registros de otro local.")
+    try:
+        eliminado = eliminar_registro(st.session_state.edit_id)
+    except (psycopg2.Error, ValueError) as error:
+        st.error(f"No se pudo eliminar el registro: {error}")
     else:
-        try:
-            eliminado = eliminar_registro(
-                st.session_state.edit_id,
-                st.session_state.edit_local,
+        if eliminado:
+            refrescar_registros_sesion()
+            limpiar_formulario()
+            notificar_exito(
+                "El registro se eliminó correctamente.", "eliminacion"
             )
-        except (psycopg2.Error, ValueError) as error:
-            st.error(f"No se pudo eliminar el registro: {error}")
+            st.rerun()
         else:
-            if eliminado:
-                refrescar_registros_sesion()
-                limpiar_formulario()
-                notificar_exito(
-                    "El registro se eliminó correctamente.", "eliminacion"
-                )
-                st.rerun()
-            else:
-                st.error("No se encontró el registro a eliminar.")
+            st.error("No se encontró el registro a eliminar.")

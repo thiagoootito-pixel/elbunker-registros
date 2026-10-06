@@ -10,8 +10,6 @@ from pathlib import Path
 
 from database import (
     ITERACIONES_HASH_CONTRASENA,
-    LOCAL_GLOBAL,
-    LOCALES_VALIDOS,
     USUARIOS_PREDEFINIDOS,
     conectar,
     guardar_usuarios_en_conexion,
@@ -103,7 +101,6 @@ def leer_usuarios_legacy(ruta, contrasena_predefinida=None):
             password_hash, salt = _hashear_contrasena(contrasena_predefinida)
             role = expected_role
             active = True
-            local = LOCAL_GLOBAL
             predefinido = True
         else:
             if role not in ROLES_VALIDOS and not re.fullmatch(
@@ -129,15 +126,6 @@ def leer_usuarios_legacy(ruta, contrasena_predefinida=None):
                 raise ValueError(
                     f"La cuenta {username!r} no tiene un hash PBKDF2 válido."
                 )
-            local = registro.get("local")
-            if role == "Administrador":
-                local = LOCAL_GLOBAL
-            elif local is None:
-                local = LOCALES_VALIDOS[0]
-            elif local not in LOCALES_VALIDOS:
-                raise ValueError(
-                    f"El local guardado para {username!r} no es válido."
-                )
             predefinido = False
 
         usuarios[username] = {
@@ -147,7 +135,6 @@ def leer_usuarios_legacy(ruta, contrasena_predefinida=None):
             "rol": role,
             "ultimo_inicio_sesion": last_login,
             "activo": active,
-            "local": local,
             "predefinido": predefinido,
         }
     return usuarios, eliminados
