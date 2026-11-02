@@ -2,30 +2,36 @@ import base64
 import calendar
 import hashlib
 import hmac
+import importlib
 import os
 import re
 import secrets
 import time
 import unicodedata
 from datetime import date, datetime
+from decimal import Decimal
 from html import escape
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import psycopg2
 import streamlit as st
+import database
+import personal_management
 from database import (
     COLUMNAS_REGISTRO,
     ITERACIONES_HASH_CONTRASENA,
     USUARIOS_PREDEFINIDOS,
+    actualizar_fecha_registros,
     actualizar_registro,
     actualizar_ultimo_inicio_sesion,
     conectar,
     consultar_registros,
     consultar_usuarios,
     consultar_usuarios_eliminados,
-    eliminar_registro,
+    eliminar_registros,
     eliminar_registros_supervisor_en_conexion,
     guardar_usuarios as guardar_usuarios_en_db,
     guardar_usuarios_en_conexion,
@@ -34,6 +40,29 @@ from database import (
     normalizar_usuarios,
 )
 
+_database_module_mtime = os.stat(database.__file__).st_mtime_ns
+_database_module_reloaded = (
+    st.session_state.get("_database_module_mtime")
+    != _database_module_mtime
+)
+if _database_module_reloaded:
+    database = importlib.reload(database)
+    st.session_state["_database_module_mtime"] = os.stat(
+        database.__file__
+    ).st_mtime_ns
+
+_personal_management_mtime = os.stat(
+    personal_management.__file__
+).st_mtime_ns
+if st.session_state.get(
+    "_personal_management_module_mtime"
+) != _personal_management_mtime or _database_module_reloaded:
+    personal_management = importlib.reload(personal_management)
+    st.session_state[
+        "_personal_management_module_mtime"
+    ] = os.stat(personal_management.__file__).st_mtime_ns
+render_gestion_personal = personal_management.render_gestion_personal
+
 
 # Configuración de la página
 st.set_page_config(
@@ -41,12 +70,38 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-with open(os.path.join(os.path.dirname(__file__), "fondo_sidebar.png"), "rb") as archivo_fondo:
-    fondo_sidebar_base64 = base64.b64encode(archivo_fondo.read()).decode("ascii")
-with open(os.path.join(os.path.dirname(__file__), "bunker_logo.png"), "rb") as archivo_logo:
-    logo_base64 = base64.b64encode(archivo_logo.read()).decode("ascii")
-with open(os.path.join(os.path.dirname(__file__), "banner_bunker.png"), "rb") as archivo_banner:
-    banner_base64 = base64.b64encode(archivo_banner.read()).decode("ascii")
+
+
+@st.cache_data(show_spinner=False)
+def cargar_imagen_base64(ruta, modificacion_ns, tamano):
+    del modificacion_ns, tamano
+    with open(ruta, "rb") as archivo:
+        return base64.b64encode(archivo.read()).decode("ascii")
+
+
+def obtener_imagen_base64(nombre_archivo):
+    ruta = os.path.join(os.path.dirname(__file__), nombre_archivo)
+    informacion = os.stat(ruta)
+    return cargar_imagen_base64(
+        ruta,
+        informacion.st_mtime_ns,
+        informacion.st_size,
+    )
+
+
+logo_base64 = obtener_imagen_base64("bunker_logo.png")
+imagen_auto_sidebar_base64 = obtener_imagen_base64("banner_bunker.png")
+estilo_banner_registros = ""
+if (
+    st.session_state.get("login_completado")
+    and st.session_state.get("menu_activo", "Registros") == "Registros"
+):
+    banner_base64 = obtener_imagen_base64("teslavolador.png")
+    estilo_banner_registros = (
+        f'.st-key-registros_hero::before {{'
+        f'background-image: url("data:image/png;base64,{banner_base64}");'
+        "}"
+    )
 
 ROLES_USUARIO = ["Supervisor", "Administrador"]
 FECHA_MINIMA_CALENDARIO = date(2026, 1, 1)
@@ -57,6 +112,27 @@ ZONA_HORARIA_PERU = ZoneInfo("America/Lima")
 def construir_titulo_seccion(seccion):
     texto = unicodedata.normalize("NFKD", f"{seccion} - BUNKER")
     return texto.encode("ascii", "ignore").decode("ascii").upper()
+
+
+def mostrar_titulo_seccion(seccion, descripcion=None):
+    descripciones = {
+        "Registros": "Registro y seguimiento de los servicios del autolavado.",
+        "Gestión": "Administra usuarios, vehículos y servicios.",
+        "Control": "Revisa los registros de servicios y gastos.",
+        "Finanzas": "Consulta los ingresos, gastos y balances del negocio.",
+        "Personal": "Servicios y montos producidos por cada lavador.",
+    }
+    titulo = construir_titulo_seccion(seccion)
+    nombre_seccion = titulo.partition(" - ")[0]
+    texto_descripcion = descripcion or descripciones.get(seccion, "")
+    st.markdown(
+        '<section class="bunker-page-heading">'
+        f'<h1>{escape(nombre_seccion)} '
+        '<span class="bunker-title-accent">- BUNKER</span></h1>'
+        f'<p>{escape(texto_descripcion)}</p>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
 
 
 def obtener_fecha_selector(clave, fecha_predeterminada):
@@ -74,11 +150,29 @@ def obtener_fecha_selector(clave, fecha_predeterminada):
     return min(max(fecha, FECHA_MINIMA_CALENDARIO), FECHA_MAXIMA_CALENDARIO)
 
 
-def actualizar_fecha_calendario(clave, fecha, clave_mes, clave_anio, on_change):
+def actualizar_periodo_calendario(
+    clave_mes, clave_anio, clave_mes_guardado, clave_anio_guardado
+):
+    st.session_state[clave_mes_guardado] = st.session_state[clave_mes]
+    st.session_state[clave_anio_guardado] = st.session_state[clave_anio]
+
+
+def actualizar_fecha_calendario(
+    clave,
+    fecha,
+    clave_mes,
+    clave_anio,
+    clave_mes_guardado,
+    clave_anio_guardado,
+    on_change,
+):
     fecha_anterior = obtener_fecha_selector(clave, fecha)
     st.session_state[clave] = fecha
     st.session_state[clave_mes] = fecha.month
     st.session_state[clave_anio] = fecha.year
+    st.session_state[clave_mes_guardado] = fecha.month
+    st.session_state[clave_anio_guardado] = fecha.year
+    st.session_state[f"{clave}_fecha_calendario_sincronizada"] = fecha
     if fecha != fecha_anterior and on_change is not None:
         on_change()
 
@@ -99,11 +193,27 @@ def seleccionar_fecha(etiqueta, clave, fecha_predeterminada, on_change=None):
         "Diciembre",
     )
     fecha_seleccionada = obtener_fecha_selector(clave, fecha_predeterminada)
-    clave_mes = f"{clave}_mes_calendario"
-    clave_anio = f"{clave}_anio_calendario"
+    clave_mes = f"{clave}_mes_calendario_v2"
+    clave_anio = f"{clave}_anio_calendario_v2"
+    clave_mes_guardado = f"{clave}_mes_calendario_guardado"
+    clave_anio_guardado = f"{clave}_anio_calendario_guardado"
     clave_popover = f"{clave}_popover_calendario"
-    st.session_state.setdefault(clave_mes, fecha_seleccionada.month)
-    st.session_state.setdefault(clave_anio, fecha_seleccionada.year)
+    clave_fecha_sincronizada = f"{clave}_fecha_calendario_sincronizada"
+    if (
+        st.session_state.get(clave_fecha_sincronizada)
+        != fecha_seleccionada
+    ):
+        st.session_state[clave_mes_guardado] = fecha_seleccionada.month
+        st.session_state[clave_anio_guardado] = fecha_seleccionada.year
+        st.session_state[clave_fecha_sincronizada] = fecha_seleccionada
+    st.session_state.setdefault(
+        clave_mes_guardado, fecha_seleccionada.month
+    )
+    st.session_state.setdefault(
+        clave_anio_guardado, fecha_seleccionada.year
+    )
+    st.session_state[clave_mes] = st.session_state[clave_mes_guardado]
+    st.session_state[clave_anio] = st.session_state[clave_anio_guardado]
 
     st.markdown(
         f'<div style="margin-bottom:0.25rem;font-size:0.875rem;">'
@@ -149,7 +259,15 @@ def seleccionar_fecha(etiqueta, clave, fecha_predeterminada, on_change=None):
                             ),
                             use_container_width=True,
                             on_click=actualizar_fecha_calendario,
-                            args=(clave, fecha_dia, clave_mes, clave_anio, on_change),
+                            args=(
+                                clave,
+                                fecha_dia,
+                                clave_mes,
+                                clave_anio,
+                                clave_mes_guardado,
+                                clave_anio_guardado,
+                                on_change,
+                            ),
                         )
 
             columnas_navegacion = st.columns(2, gap="small")
@@ -159,6 +277,13 @@ def seleccionar_fecha(etiqueta, clave, fecha_predeterminada, on_change=None):
                     options=range(1, 13),
                     format_func=lambda numero: meses[numero - 1],
                     key=clave_mes,
+                    on_change=actualizar_periodo_calendario,
+                    args=(
+                        clave_mes,
+                        clave_anio,
+                        clave_mes_guardado,
+                        clave_anio_guardado,
+                    ),
                     label_visibility="collapsed",
                 )
             with columnas_navegacion[1]:
@@ -169,6 +294,13 @@ def seleccionar_fecha(etiqueta, clave, fecha_predeterminada, on_change=None):
                         FECHA_MAXIMA_CALENDARIO.year + 1,
                     ),
                     key=clave_anio,
+                    on_change=actualizar_periodo_calendario,
+                    args=(
+                        clave_mes,
+                        clave_anio,
+                        clave_mes_guardado,
+                        clave_anio_guardado,
+                    ),
                     label_visibility="collapsed",
                 )
 
@@ -445,6 +577,8 @@ if st.session_state.get("_version_autenticacion") != VERSION_AUTENTICACION:
     st.session_state.admin_autorizado = False
     st.session_state.pop("_registros_sesion", None)
     st.session_state.pop("_alcance_registros_sesion", None)
+    st.session_state.pop("_gestion_personal_prefetch", None)
+    st.session_state.pop("_gestion_personal_prefetch_future", None)
     st.session_state.pop("usuario_actual", None)
     st.session_state.pop("rol_usuario", None)
     st.session_state._version_autenticacion = VERSION_AUTENTICACION
@@ -466,9 +600,11 @@ if not st.session_state.login_completado:
             padding: 0 !important;
         }
         body:has(.st-key-login_shell) [data-testid="stAppViewContainer"] {
-            background: #090d0a;
+            background: #07111e;
         }
         .st-key-login_shell {
+            position: relative;
+            isolation: isolate;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -476,11 +612,31 @@ if not st.session_state.login_completado:
             width: 100%;
             min-height: 100vh;
             padding: 1.5rem;
-            background-color: #090d0a;
+            overflow: hidden;
+            background-color: #07111e;
             background-image:
-                linear-gradient(rgba(8, 12, 9, 0.94), rgba(8, 12, 9, 0.94)),
-                repeating-linear-gradient(0deg, transparent 0 31px, rgba(166, 207, 126, 0.035) 32px),
-                repeating-linear-gradient(90deg, transparent 0 31px, rgba(166, 207, 126, 0.035) 32px);
+                radial-gradient(ellipse at 70% 10%, rgba(38, 70, 103, 0.2), transparent 42%),
+                repeating-linear-gradient(0deg, transparent 0 31px, rgba(139, 164, 192, 0.025) 32px),
+                repeating-linear-gradient(90deg, transparent 0 31px, rgba(139, 164, 192, 0.025) 32px);
+        }
+        .st-key-login_shell::after {
+            position: absolute;
+            top: 2rem;
+            right: 2rem;
+            width: 5rem;
+            height: 3rem;
+            pointer-events: none;
+            background: linear-gradient(
+                130deg,
+                transparent 0 28%,
+                #344b63 28% 43%,
+                transparent 43% 54%,
+                #ff3545 54% 65%,
+                transparent 65% 100%
+            );
+            clip-path: polygon(32% 0, 100% 0, 67% 100%, 0 100%);
+            content: "";
+            opacity: 0.8;
         }
         .st-key-login_shell > [data-testid="stLayoutWrapper"] {
             width: min(420px, calc(100vw - 3rem));
@@ -488,14 +644,16 @@ if not st.session_state.login_completado:
             flex: 0 1 420px;
         }
         .st-key-login_card {
+            position: relative;
+            z-index: 1;
             box-sizing: border-box;
             width: 100%;
             padding: 2rem;
-            border: 1px solid rgba(163, 230, 53, 0.2);
-            border-top: 3px solid #a3e635;
-            border-radius: 8px;
-            background: #121714;
-            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42);
+            border: 1px solid rgba(81, 108, 138, 0.46);
+            border-top: 3px solid #ff3545;
+            border-radius: 12px;
+            background: linear-gradient(145deg, #0d1a2a, #091522);
+            box-shadow: 0 22px 54px rgba(0, 0, 0, 0.34);
         }
         .st-key-login_card > [data-testid="stVerticalBlock"] {
             gap: 0.75rem;
@@ -513,7 +671,7 @@ if not st.session_state.login_completado:
         }
         .login-eyebrow {
             margin: 0;
-            color: #a3e635;
+            color: #ff5361;
             font-size: 0.72rem;
             font-weight: 700;
             letter-spacing: 0.12em;
@@ -521,24 +679,24 @@ if not st.session_state.login_completado:
         }
         .login-title {
             margin: 0 0 0.5rem;
-            color: #f1f5ef;
+            color: #f4f7fb;
             font-size: 1.55rem;
             font-weight: 650;
             text-align: center;
         }
         .st-key-login_card [data-testid="stTextInput"] label {
-            color: #c5cdc6;
+            color: #b5c4d7;
         }
         .st-key-login_card [data-testid="stTextInput"] input {
             min-height: 2.75rem;
-            border-color: rgba(192, 209, 193, 0.2);
-            background: #0a0f0c;
-            color: #f1f5ef;
-            -webkit-text-fill-color: #f1f5ef;
+            border-color: #30465f;
+            background: #101f31;
+            color: #f1f5fb;
+            -webkit-text-fill-color: #f1f5fb;
         }
         .st-key-login_card [data-testid="stAlertContainer"][role="alert"] {
             border: 1px solid rgba(248, 113, 113, 0.35);
-            background: rgba(120, 40, 40, 0.24);
+            background: rgba(120, 40, 50, 0.28);
             color: #ffd6d2;
         }
         .st-key-login_card [data-testid="stAlertContainer"][role="alert"] p,
@@ -549,16 +707,16 @@ if not st.session_state.login_completado:
         }
         .st-key-login_form button {
             min-height: 2.8rem;
-            border: 1px solid #a3e635;
-            border-radius: 6px;
-            background: #a3e635;
-            color: #10160c;
+            border: 1px solid #ff3545;
+            border-radius: 8px;
+            background: linear-gradient(110deg, #e8273b, #ff3545);
+            color: #fff;
             font-weight: 700;
         }
         .st-key-login_form button:hover {
-            border-color: #b8f45a;
-            background: #b8f45a;
-            color: #10160c;
+            border-color: #ff6671;
+            background: #ff4653;
+            color: #fff;
         }
         @media (max-width: 480px) {
             .st-key-login_shell {
@@ -642,6 +800,8 @@ if st.session_state.login_completado:
         st.session_state.admin_autorizado = False
         st.session_state.pop("_registros_sesion", None)
         st.session_state.pop("_alcance_registros_sesion", None)
+        st.session_state.pop("_gestion_personal_prefetch", None)
+        st.session_state.pop("_gestion_personal_prefetch_future", None)
         st.session_state.pop("_usuarios_sesion", None)
         st.session_state.pop("_usuarios_eliminados_sesion", None)
         st.session_state.pop("usuario_actual", None)
@@ -729,15 +889,15 @@ st.markdown(
     [data-testid="stSidebarCollapsedControl"] button {
         min-width: 2.5rem !important;
         min-height: 2.5rem !important;
-        border: 1px solid rgba(163, 230, 53, 0.5) !important;
+        border: 1px solid rgba(255, 53, 69, 0.5) !important;
         border-radius: 0.65rem !important;
-        background: #151d16 !important;
-        color: #d9f99d !important;
+        background: #101f31 !important;
+        color: #ff9da5 !important;
         cursor: pointer !important;
     }
     [data-testid="stSidebarCollapsedControl"] button:hover {
-        border-color: #a3e635 !important;
-        background: #202b20 !important;
+        border-color: #ff3545 !important;
+        background: #17283c !important;
     }
     .st-key-menu_usuario {
         position: fixed !important;
@@ -755,17 +915,17 @@ st.markdown(
         min-width: 48px;
         height: 48px;
         padding: 0;
-        border: 1px solid rgba(163, 230, 53, 0.5);
+        border: 1px solid rgba(255, 53, 69, 0.5);
         border-radius: 50%;
-        background: #151d16;
-        color: #d9f99d;
+        background: #101f31;
+        color: #ff9da5;
         cursor: pointer !important;
         pointer-events: auto !important;
     }
     .st-key-menu_usuario button:hover {
-        border-color: #a3e635;
-        background: #202b20;
-        color: #d9f99d;
+        border-color: #ff3545;
+        background: #17283c;
+        color: #fff;
     }
     body:has(
         .st-key-menu_usuario
@@ -775,9 +935,9 @@ st.markdown(
         z-index: 1000002 !important;
         width: 220px !important;
         padding: 0.85rem;
-        border: 1px solid rgba(163, 230, 53, 0.22);
+        border: 1px solid rgba(255, 53, 69, 0.24);
         border-radius: 8px;
-        background: #121714;
+        background: #0d1a2a;
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
     }
     body:has(
@@ -791,7 +951,7 @@ st.markdown(
         display: flex;
         justify-content: center;
         margin: 0.25rem 0 0.75rem;
-        color: #a3e635;
+        color: #ff5361;
         font-size: 2rem;
         line-height: 1;
     }
@@ -916,6 +1076,53 @@ st.markdown(
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 0.7rem;
     }
+    .personal-resumen-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.7rem;
+    }
+    .personal-bonificacion-card {
+        box-sizing: border-box;
+        min-height: 11rem;
+        padding: 1.2rem;
+        border: 1px solid rgba(230, 162, 60, 0.35);
+        border-radius: 10px;
+        background: linear-gradient(145deg, rgba(56, 43, 20, 0.78), rgba(19, 29, 39, 0.96));
+    }
+    .personal-bonificacion-etiqueta {
+        color: #e8d6ae;
+        font-size: 0.9rem;
+        font-weight: 650;
+    }
+    .personal-bonificacion-valor {
+        margin-top: 1.15rem;
+        color: #ffd700;
+        font-size: clamp(1.8rem, 3vw, 2.5rem);
+        font-variant-numeric: tabular-nums;
+        font-weight: 800;
+        letter-spacing: -0.035em;
+        line-height: 1.1;
+    }
+    .personal-bonificacion-pie {
+        margin-top: 0.55rem;
+        color: #aeb9c5;
+        font-size: 0.78rem;
+    }
+    .stApp:has(#personal-theme-marker) .reportes-kpi-periodo {
+        border-color: rgba(34, 197, 94, 0.42) !important;
+        background: rgba(34, 197, 94, 0.12) !important;
+        color: #86efac !important;
+    }
+    .stApp .st-key-personal_bonificacion_panel {
+        padding: 0.25rem 0.35rem 0.1rem;
+        border-color: rgba(34, 197, 94, 0.2);
+        background: rgba(9, 19, 31, 0.42);
+    }
+    .stApp .st-key-personal_bonificacion_chart {
+        border-color: rgba(76, 103, 132, 0.62);
+        border-radius: 10px;
+        background: linear-gradient(145deg, rgba(19, 35, 54, 0.72), rgba(10, 23, 38, 0.72));
+    }
     .reportes-kpi-card {
         position: relative;
         min-width: 0;
@@ -948,44 +1155,27 @@ st.markdown(
     }
     .reportes-kpi-card.finanzas-metodo-card {
         --finanzas-metodo-color: #93c5fd;
-        --finanzas-metodo-color-suave: rgba(147, 197, 253, 0.28);
     }
     .reportes-kpi-card.finanzas-metodo-card .reportes-kpi-acento {
         background: var(--finanzas-metodo-color);
     }
-    .reportes-kpi-card.finanzas-metodo-card::after {
-        position: absolute;
-        top: 0;
-        right: 0;
-        width: 9px;
-        height: 100%;
-        background: linear-gradient(
-            180deg,
-            var(--finanzas-metodo-color),
-            var(--finanzas-metodo-color-suave)
-        );
-        clip-path: polygon(38% 0, 100% 0, 100% 100%, 0 100%);
-        content: "";
-    }
     .reportes-kpi-card.finanzas-metodo-efectivo {
-        --finanzas-metodo-color: #4ade80;
-        --finanzas-metodo-color-suave: rgba(74, 222, 128, 0.28);
+        --finanzas-metodo-color: #27d98b;
     }
     .reportes-kpi-card.finanzas-metodo-yape {
-        --finanzas-metodo-color: #c084fc;
-        --finanzas-metodo-color-suave: rgba(192, 132, 252, 0.28);
+        --finanzas-metodo-color: #b779f7;
     }
     .reportes-kpi-card.finanzas-metodo-plin {
-        --finanzas-metodo-color: #67e8f9;
-        --finanzas-metodo-color-suave: rgba(103, 232, 249, 0.28);
+        --finanzas-metodo-color: #35d6e8;
     }
     .reportes-kpi-card.finanzas-metodo-transferencia {
-        --finanzas-metodo-color: #fb923c;
-        --finanzas-metodo-color-suave: rgba(251, 146, 60, 0.28);
+        --finanzas-metodo-color: #ff9b43;
     }
     .reportes-kpi-card.finanzas-metodo-tarjeta {
-        --finanzas-metodo-color: #2563eb;
-        --finanzas-metodo-color-suave: rgba(37, 99, 235, 0.32);
+        --finanzas-metodo-color: #2388ff;
+    }
+    .reportes-kpi-card.finanzas-metodo-otros {
+        --finanzas-metodo-color: #93c5fd;
     }
     .reportes-kpi-etiqueta {
         overflow: hidden;
@@ -994,6 +1184,9 @@ st.markdown(
         font-weight: 600;
         text-overflow: ellipsis;
         white-space: nowrap;
+    }
+    .personal-ingresos-panel .reportes-kpi-etiqueta {
+        white-space: normal;
     }
     .reportes-kpi-icono {
         margin-bottom: 0.55rem;
@@ -1088,6 +1281,9 @@ st.markdown(
         .reportes-kpi-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
+        .personal-resumen-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
         .finanzas-kpi-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
@@ -1101,6 +1297,9 @@ st.markdown(
     @media (min-width: 641px) and (max-width: 1000px) {
         .reportes-kpi-grid {
             grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .personal-resumen-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
     [data-testid="stTextInput"] label,
@@ -1170,6 +1369,26 @@ st.markdown(
         background-color: #A8DDBA !important;
         border-color: #7FC693 !important;
     }
+    .st-key-cambiar_fecha_seleccionados button {
+        background-color: #BFE8CE !important;
+        border-color: #95D3AA !important;
+        color: #174B2B !important;
+        -webkit-text-fill-color: #174B2B !important;
+    }
+    .st-key-cambiar_fecha_seleccionados button:hover {
+        background-color: #A8DDBA !important;
+        border-color: #7FC693 !important;
+    }
+    .st-key-eliminar_registros_seleccionados button {
+        background-color: #F4C1BB !important;
+        border-color: #E69A91 !important;
+        color: #702B25 !important;
+        -webkit-text-fill-color: #702B25 !important;
+    }
+    .st-key-eliminar_registros_seleccionados button:hover {
+        background-color: #EFA8A0 !important;
+        border-color: #D98279 !important;
+    }
     [data-testid="stAlertContainer"] {
         border-radius: 10px !important;
         backdrop-filter: blur(12px);
@@ -1220,6 +1439,51 @@ st.markdown(
         background-color: #fff !important;
         color: #111 !important;
         -webkit-text-fill-color: #111;
+    }
+    .st-key-input_placa [data-testid="stTextInput"] input,
+    .st-key-input_ruc_cliente [data-testid="stTextInput"] input,
+    .st-key-input_razon_social_cliente [data-testid="stTextInput"] input,
+    .st-key-input_numero_cliente [data-testid="stTextInput"] input,
+    .st-key-input_correo_cliente [data-testid="stTextInput"] input {
+        padding-left: 2.65rem !important;
+        background-position: 0.9rem center !important;
+        background-repeat: no-repeat !important;
+        background-size: 1.1rem 1.1rem !important;
+    }
+    .st-key-input_placa [data-testid="stTextInput"] input {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3.4 13.4a2 2 0 0 1 0-2.8l7.2-7.2a2 2 0 0 1 1.4-.6H19a2 2 0 0 1 2 2v7a2 2 0 0 1-.4 1.6Z'/%3E%3Ccircle cx='16.5' cy='7.5' r='1.2'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_ruc_cliente [data-testid="stTextInput"] input {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2'/%3E%3Cpath d='M7 10h4M7 14h2m4-4h4m-4 4h4'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_razon_social_cliente [data-testid="stTextInput"] input {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M5 21v-2a7 7 0 0 1 14 0v2'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_numero_cliente [data-testid="stTextInput"] input {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.4 19.4 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7l.5 3a2 2 0 0 1-.6 1.7L7.1 10.3a16 16 0 0 0 6.6 6.6l1.9-1.9a2 2 0 0 1 1.7-.6l3 .5a2 2 0 0 1 1.7 2Z'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_correo_cliente [data-testid="stTextInput"] input {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2'/%3E%3Cpath d='m3 7 9 6 9-6'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_motivo [data-testid="stSelectbox"] [role="combobox"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z'/%3E%3Cpath d='M14 2v6h6M8 13h8m-8 4h8'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_tipo [data-testid="stSelectbox"] [role="combobox"],
+    .st-key-input_pago [data-testid="stSelectbox"] [role="combobox"],
+    .st-key-input_motivo [data-testid="stSelectbox"] [role="combobox"],
+    .st-key-input_metodo_gasto [data-testid="stSelectbox"] [role="combobox"] {
+        box-sizing: border-box !important;
+        padding-left: 2.65rem !important;
+        background-position: 0.9rem center !important;
+        background-repeat: no-repeat !important;
+        background-size: 1.1rem 1.1rem !important;
+    }
+    .st-key-input_tipo [data-testid="stSelectbox"] [role="combobox"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 11 7 5h10l2 6'/%3E%3Cpath d='M3 11h18l-1.5 8h-15L3 11Z'/%3E%3Ccircle cx='7.5' cy='16' r='1'/%3E%3Ccircle cx='16.5' cy='16' r='1'/%3E%3Cpath d='M7 5 5 3m12 2 2-2'/%3E%3C/svg%3E") !important;
+    }
+    .st-key-input_pago [data-testid="stSelectbox"] [role="combobox"],
+    .st-key-input_metodo_gasto [data-testid="stSelectbox"] [role="combobox"] {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23B3262D' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2'/%3E%3Cpath d='M3 10h18M7 15h3'/%3E%3C/svg%3E") !important;
     }
     [data-testid="stSelectbox"] [role="group"],
     [data-testid="stMultiSelect"] [role="group"] {
@@ -1392,21 +1656,6 @@ st.markdown(
 st.markdown(
     f"""
     <style>
-    [data-testid="stSidebar"] {{
-        background-image:
-            linear-gradient(rgba(15, 20, 25, 0.85), rgba(15, 20, 25, 0.85)),
-            url("data:image/png;base64,{fondo_sidebar_base64}");
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown(
-    f"""
-    <style>
     body:has(#registros-theme-marker) [data-testid="stHeader"] {{
         position: fixed !important;
         top: 0 !important;
@@ -1447,9 +1696,7 @@ st.markdown(
         -webkit-backdrop-filter: blur(5px);
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
     }}
-    .st-key-registros_hero::before {{
-        background-image: url("data:image/png;base64,{banner_base64}");
-    }}
+    {estilo_banner_registros}
     body:has(#registros-theme-marker) .st-key-registros_hero > [data-testid="stLayoutWrapper"] {{
         transform: translateY(38px);
     }}
@@ -1481,6 +1728,7 @@ COLUMNAS_VALIDAS = [
     *COLUMNAS_CLIENTE, "Registrado por",
 ]
 COLUMNAS_EXPORTACION = [
+    ("Registrado por", "Registrado por"),
     ("Tipo", "TIPO"),
     ("Placa", "PLACA"),
     ("Servicio", "SERVICIO"),
@@ -1512,7 +1760,7 @@ def guardar_catalogo(archivo, valores):
         catalogo.write("\n".join(valores) + "\n")
 
 def consultar_dataframe(fecha=None, supervisor=None, mes=None):
-    df = _obtener_registros_sesion()
+    df = _obtener_registros_sesion(copiar=False)
     if fecha is not None and not df.empty:
         fechas = df["Fecha"].map(parsear_fecha)
         df = df.loc[
@@ -1537,7 +1785,7 @@ def consultar_dataframe(fecha=None, supervisor=None, mes=None):
     return df.reindex(columns=COLUMNAS_VALIDAS, fill_value="").copy()
 
 
-def _obtener_registros_sesion(forzar_recarga=False):
+def _obtener_registros_sesion(forzar_recarga=False, copiar=True):
     nombre_usuario = st.session_state.get("usuario_actual")
     cuenta = usuarios.get(nombre_usuario, {})
     rol = cuenta.get("rol", st.session_state.get("rol_usuario", ""))
@@ -1559,15 +1807,37 @@ def _obtener_registros_sesion(forzar_recarga=False):
                 for nombre_app, nombre_sql in COLUMNAS_REGISTRO.items()
             }
         )
-        st.session_state["_registros_sesion"] = df.reindex(
+        df_sesion = df.reindex(
             columns=COLUMNAS_VALIDAS, fill_value=""
         )
+        st.session_state["_registros_sesion"] = df_sesion
+        st.session_state["_version_registros_sesion"] = (
+            st.session_state.get("_version_registros_sesion", 0) + 1
+        )
+        st.session_state["_huella_datos_bonificacion"] = int(
+            pd.util.hash_pandas_object(
+                df_sesion[
+                    [
+                        "Fecha",
+                        "Tipo",
+                        "Monto",
+                        "Lavador 1",
+                        "Lavador 2",
+                        "Lavador 3",
+                    ]
+                ],
+                index=True,
+            ).sum()
+        )
         st.session_state["_alcance_registros_sesion"] = alcance
-    return st.session_state["_registros_sesion"].copy()
+    df_sesion = st.session_state["_registros_sesion"]
+    return df_sesion.copy() if copiar else df_sesion
 
 
 def refrescar_registros_sesion():
     if st.session_state.get("login_completado"):
+        database.invalidar_cache_resumenes_personal()
+        personal_management.invalidar_cache_gestion_personal()
         _obtener_registros_sesion(forzar_recarga=True)
 
 
@@ -1611,38 +1881,41 @@ def estilo_metodo_pago(valor):
     return estilos.get(str(valor).strip().casefold())
 
 def estilo_fila_tabla(fila, filas_seleccionadas):
-    estilo_base = "background-color: #FFFFFF; color: #111111;"
-    if fila.name in filas_seleccionadas:
-        estilo_base = "background-color: rgba(179, 38, 45, 0.72); color: #FFFFFF;"
+    fila_seleccionada = fila.name in filas_seleccionadas
+    estilo_base = "background-color: #FFFFFF; color: #17212E;"
+    if fila_seleccionada:
+        estilo_base = "background-color: #8F1D2A; color: #FFFFFF;"
     estilos_celdas = [estilo_base] * len(fila)
 
-    estilo_pago = estilo_metodo_pago(fila["Pago"])
-    if estilo_pago:
-        estilos_celdas[fila.index.get_loc("Pago")] = estilo_pago
-        if "Monto" in fila.index:
-            estilos_celdas[fila.index.get_loc("Monto")] = estilo_pago
+    if not fila_seleccionada:
+        estilo_pago = estilo_metodo_pago(fila["Pago"])
+        if estilo_pago:
+            estilos_celdas[fila.index.get_loc("Pago")] = estilo_pago
+            if "Monto" in fila.index:
+                estilos_celdas[fila.index.get_loc("Monto")] = estilo_pago
 
-    if "Método Gasto" in fila.index:
+    if not fila_seleccionada and "Método Gasto" in fila.index:
         estilo_gasto = estilo_metodo_pago(fila["Método Gasto"])
         if estilo_gasto:
             estilos_celdas[fila.index.get_loc("Método Gasto")] = estilo_gasto
 
-    if "Registrado por" in fila.index:
+    if not fila_seleccionada and "Registrado por" in fila.index:
         rol = str(fila["Registrado por"]).strip()
-        if rol == "Administrador":
+        if (
+            rol == "Administrador"
+            or normalizar_responsable(rol) == "Administrador"
+        ):
             estilo_rol = (
                 "background-color: #DDF3E4; color: #245B35; "
-                "font-weight: 600; text-align: center; border-radius: 999px; "
-                "border: 1px solid #B9DFC5;"
+                "font-weight: 600; text-align: center;"
             )
         elif (
             rol.startswith(("Lavador", "Supervisor"))
             or normalizar_responsable(rol) in USUARIOS_SUPERVISORES
         ):
             estilo_rol = (
-                "background-color: #DCEBFA; color: #1E4E79; "
-                "font-weight: 600; text-align: center; border-radius: 999px; "
-                "border: 1px solid #B9D5F0;"
+                "background-color: #FFE2C2; color: #9A3412; "
+                "font-weight: 600; text-align: center;"
             )
         else:
             estilo_rol = "color: #667085; text-align: center;"
@@ -1685,12 +1958,14 @@ def crear_tabla_estilizada(
     )
 
 
-def obtener_columnas_visibles_registros(df):
+def obtener_columnas_visibles_registros(df, incluir_usuario=False):
     columnas = [
         columna
         for columna in df.columns
         if columna not in {"ID", "Registrado por"}
     ]
+    if incluir_usuario and "Registrado por" in df.columns:
+        columnas.insert(0, "Registrado por")
     if "Fecha" in columnas:
         columnas.insert(columnas.index("Fecha") + 1, "Hora")
     return columnas
@@ -1820,6 +2095,19 @@ def filtrar_registros_por_mes(df, fecha):
         .drop(columns="_fecha_orden")
     )
 
+
+def filtrar_registros_acumulados_mes(df, fecha):
+    registros_mes = filtrar_registros_por_mes(df, fecha)
+    if registros_mes.empty:
+        return registros_mes
+    fechas_registros_mes = registros_mes["Fecha"].map(parsear_fecha)
+    return registros_mes.loc[
+        fechas_registros_mes.map(
+            lambda valor: pd.notna(valor) and valor.date() <= fecha
+        )
+    ].copy()
+
+
 def filtrar_registros_del_mes(df, ahora=None):
     ahora = ahora or datetime.now(ZONA_HORARIA_PERU)
     if df.empty:
@@ -1869,6 +2157,25 @@ def calcular_resumen_financiero(df, ahora=None):
     return ganancia_dia, gasto_dia, ganancia_mes, gasto_mes
 
 
+def normalizar_metodos_financieros(valores):
+    metodos = valores.fillna("").astype(str).str.strip()
+    metodos = metodos.mask(
+        metodos.str.casefold().isin({"", "-", "nan", "none"}),
+        "Sin método especificado",
+    )
+    nombres_metodo = {
+        "efectivo": "Efectivo",
+        "yape": "Yape",
+        "plin": "Plin",
+        "tarjeta": "Tarjeta",
+        "transferencia": "Transferencia",
+        "yape/plin": "Yape/Plin (histórico)",
+    }
+    return metodos.map(
+        lambda metodo: nombres_metodo.get(metodo.casefold(), metodo)
+    )
+
+
 def desglosar_metodos_financieros(df):
     metodos_base = ["Efectivo", "Yape", "Plin", "Tarjeta", "Transferencia"]
     if df.empty:
@@ -1876,58 +2183,145 @@ def desglosar_metodos_financieros(df):
             metodo: 0.0 for metodo in metodos_base
         }
 
-    df_metricas = df.copy()
-    es_gasto = df_metricas["Tipo"].fillna("").astype(str).str.contains(
+    es_gasto = df["Tipo"].fillna("").astype(str).str.contains(
         r"\b(?:gasto|egreso|expense)\b", case=False, regex=True
     )
-    monto_ingreso = df_metricas["Monto"].map(limpiar_monto)
-    monto_gasto = df_metricas["Precio Gasto"].map(limpiar_monto).abs()
+    monto_ingreso = df["Monto"].map(limpiar_monto)
+    monto_gasto = df["Precio Gasto"].map(limpiar_monto).abs()
     monto_gasto = monto_gasto.where(
         monto_gasto > 0,
         monto_ingreso.abs().where(es_gasto, 0.0),
     )
 
-    def agrupar_por_metodo(filas, columna, montos):
-        metodos = filas[columna].fillna("").astype(str).str.strip()
-        metodos = metodos.mask(
-            metodos.str.casefold().isin({"", "-", "nan", "none"}),
-            "Sin método especificado",
-        )
-        nombres_metodo = {
-            "efectivo": "Efectivo",
-            "yape": "Yape",
-            "plin": "Plin",
-            "tarjeta": "Tarjeta",
-            "transferencia": "Transferencia",
-            "yape/plin": "Yape/Plin (histórico)",
-        }
-        metodos = metodos.map(
-            lambda metodo: nombres_metodo.get(metodo.casefold(), metodo)
-        )
-        return (
-            montos.loc[filas.index]
-            .groupby(metodos)
-            .sum()
-            .to_dict()
-        )
-
-    ingresos = agrupar_por_metodo(
-        df_metricas.loc[~es_gasto],
-        "Pago",
-        monto_ingreso.loc[~es_gasto],
+    ingresos = (
+        monto_ingreso.loc[~es_gasto]
+        .groupby(normalizar_metodos_financieros(df.loc[~es_gasto, "Pago"]))
+        .sum()
+        .to_dict()
     )
     filas_con_gasto = monto_gasto > 0
-    gastos = agrupar_por_metodo(
-        df_metricas.loc[filas_con_gasto],
-        "Método Gasto",
-        monto_gasto.loc[filas_con_gasto],
+    gastos = (
+        monto_gasto.loc[filas_con_gasto]
+        .groupby(
+            normalizar_metodos_financieros(
+                df.loc[filas_con_gasto, "Método Gasto"]
+            )
+        )
+        .sum()
+        .to_dict()
     )
-
     for metodo in metodos_base:
         ingresos.setdefault(metodo, 0.0)
         gastos.setdefault(metodo, 0.0)
-
     return ingresos, gastos
+
+
+def preparar_registros_financieros(df):
+    preparados = df.copy()
+    fechas = pd.to_datetime(
+        preparados["Fecha"].map(parsear_fecha), errors="coerce"
+    )
+    es_gasto = preparados["Tipo"].fillna("").astype(str).str.contains(
+        r"\b(?:gasto|egreso|expense)\b", case=False, regex=True
+    )
+    monto_ingreso = preparados["Monto"].map(limpiar_monto)
+    monto_gasto = preparados["Precio Gasto"].map(limpiar_monto).abs()
+    monto_gasto = monto_gasto.where(
+        monto_gasto > 0,
+        monto_ingreso.abs().where(es_gasto, 0.0),
+    )
+    preparados["_fecha_finanzas"] = fechas
+    preparados["_periodo_finanzas"] = fechas.dt.to_period("M")
+    preparados["_dia_finanzas"] = fechas.dt.date
+    preparados["_es_gasto_finanzas"] = es_gasto
+    preparados["_monto_ingreso_finanzas"] = monto_ingreso.where(
+        ~es_gasto, 0.0
+    )
+    preparados["_monto_gasto_finanzas"] = monto_gasto
+    preparados["_metodo_ingreso_finanzas"] = normalizar_metodos_financieros(
+        preparados["Pago"]
+    )
+    preparados["_metodo_gasto_finanzas"] = normalizar_metodos_financieros(
+        preparados["Método Gasto"]
+    )
+    preparados["_responsable_finanzas"] = preparados["Registrado por"].map(
+        normalizar_responsable
+    )
+    preparados["_responsable_busqueda_finanzas"] = (
+        preparados["Registrado por"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+    )
+    return preparados
+
+
+def obtener_registros_financieros_sesion(df):
+    version = st.session_state.get("_version_registros_sesion", 0)
+    if st.session_state.get("_version_registros_financieros") != version:
+        st.session_state["_registros_financieros_sesion"] = (
+            preparar_registros_financieros(df)
+        )
+        st.session_state["_responsables_financieros_sesion"] = (
+            obtener_responsables_reporte(df)[1:]
+        )
+        st.session_state["_version_registros_financieros"] = version
+    return (
+        st.session_state["_registros_financieros_sesion"],
+        st.session_state["_responsables_financieros_sesion"],
+    )
+
+
+def filtrar_registros_financieros(df, fecha, periodo):
+    if df.empty:
+        return df
+    if periodo == "Día":
+        coincide_periodo = df["_dia_finanzas"] == fecha
+    else:
+        coincide_periodo = df["_periodo_finanzas"] == pd.Period(
+            year=fecha.year, month=fecha.month, freq="M"
+        )
+    return df.loc[coincide_periodo]
+
+
+def desglosar_registros_financieros(df):
+    metodos_base = ["Efectivo", "Yape", "Plin", "Tarjeta", "Transferencia"]
+    if df.empty:
+        return {metodo: 0.0 for metodo in metodos_base}, {
+            metodo: 0.0 for metodo in metodos_base
+        }
+
+    ingresos = (
+        df.loc[~df["_es_gasto_finanzas"]]
+        .groupby("_metodo_ingreso_finanzas")["_monto_ingreso_finanzas"]
+        .sum()
+        .to_dict()
+    )
+    filas_con_gasto = df["_monto_gasto_finanzas"] > 0
+    gastos = (
+        df.loc[filas_con_gasto]
+        .groupby("_metodo_gasto_finanzas")["_monto_gasto_finanzas"]
+        .sum()
+        .to_dict()
+    )
+    for metodo in metodos_base:
+        ingresos.setdefault(metodo, 0.0)
+        gastos.setdefault(metodo, 0.0)
+    return ingresos, gastos
+
+
+def calcular_ingresos_financieros_por_responsable(
+    df, fecha, periodo, responsables
+):
+    filtrados = filtrar_registros_financieros(df, fecha, periodo)
+    ingresos = (
+        filtrados.groupby("_responsable_finanzas")[
+            "_monto_ingreso_finanzas"
+        ]
+        .sum()
+    )
+    return ingresos.reindex(responsables, fill_value=0.0)
 
 
 def calcular_ingresos_por_responsable(df, fecha, periodo, hasta_fecha=None):
@@ -1961,6 +2355,129 @@ def calcular_ingresos_por_responsable(df, fecha, periodo, hasta_fecha=None):
     ].sum()
     return ingresos.reindex(orden_responsables, fill_value=0.0)
 
+
+def calcular_metricas_lavadores(df, lavadores, lavador_detalle=None):
+    claves_lavadores = {
+        str(lavador).strip().casefold()
+        for lavador in lavadores
+        if str(lavador).strip()
+    }
+    metricas_por_lavador = {
+        lavador: {
+            "vehiculos": 0,
+            "solitarios": 0,
+            "compartidos": 0,
+            "grupales": 0,
+            "monto_solitario": 0.0,
+            "monto_compartido": 0.0,
+            "monto_grupal": 0.0,
+            "monto": 0.0,
+        }
+        for lavador in claves_lavadores
+    }
+    detalles = []
+    lavador_detalle_normalizado = (
+        str(lavador_detalle).strip().casefold()
+        if lavador_detalle
+        else None
+    )
+    if df.empty or not claves_lavadores:
+        return metricas_por_lavador, pd.DataFrame()
+
+    claves_monto_modalidad = {
+        1: ("Solitario", "solitarios", "monto_solitario"),
+        2: ("Compartido (2 lavadores)", "compartidos", "monto_compartido"),
+        3: ("Grupal (3 lavadores)", "grupales", "monto_grupal"),
+    }
+    for registro in df.to_dict("records"):
+        tipo_registro = registro.get("Tipo", "")
+        if pd.notna(tipo_registro) and re.search(
+            r"\b(?:gasto|egreso|expense)\b",
+            str(tipo_registro).strip(),
+            re.IGNORECASE,
+        ):
+            continue
+
+        participantes = []
+        participantes_vistos = set()
+        for columna in ("Lavador 1", "Lavador 2", "Lavador 3"):
+            valor_nombre = registro.get(columna, "")
+            if pd.isna(valor_nombre):
+                continue
+            nombre = str(valor_nombre).strip()
+            nombre_normalizado = nombre.casefold()
+            if nombre_normalizado in {"", "-", "nan", "none"}:
+                continue
+            if nombre_normalizado not in participantes_vistos:
+                participantes.append(nombre)
+                participantes_vistos.add(nombre_normalizado)
+
+        cantidad_participantes = len(participantes)
+        if cantidad_participantes not in claves_monto_modalidad:
+            continue
+
+        modalidad, clave_conteo, clave_monto_modalidad = (
+            claves_monto_modalidad[cantidad_participantes]
+        )
+        monto_lavado = limpiar_monto(registro.get("Monto", ""))
+        monto_producido = monto_lavado / cantidad_participantes
+        for lavador in participantes_vistos & claves_lavadores:
+            metricas = metricas_por_lavador[lavador]
+            metricas["vehiculos"] += 1
+            metricas[clave_conteo] += 1
+            metricas["monto"] += monto_producido
+            metricas[clave_monto_modalidad] += monto_producido
+
+        if lavador_detalle_normalizado not in participantes_vistos:
+            continue
+
+        def obtener_texto_registro(columna):
+            valor = registro.get(columna, "")
+            return "" if pd.isna(valor) else str(valor)
+
+        fecha_registro = parsear_fecha(registro.get("Fecha", ""))
+        detalles.append(
+            {
+                "Fecha": (
+                    fecha_registro.strftime("%d/%m/%Y %I:%M %p")
+                    if pd.notna(fecha_registro)
+                    else str(registro.get("Fecha", ""))
+                ),
+                "Placa": obtener_texto_registro("Placa"),
+                "Servicio": obtener_texto_registro("Servicio"),
+                "Modalidad": modalidad,
+                "Participantes": ", ".join(participantes),
+                "Monto del lavado": monto_lavado,
+                "Monto producido": monto_producido,
+            }
+        )
+
+    return metricas_por_lavador, pd.DataFrame.from_records(detalles)
+
+
+def calcular_metricas_lavador(df, lavador):
+    lavador_normalizado = str(lavador or "").strip().casefold()
+    metricas, detalles = calcular_metricas_lavadores(
+        df,
+        [lavador],
+        lavador_detalle=lavador,
+    )
+    metricas_lavador = metricas.get(
+        lavador_normalizado,
+        {
+            "vehiculos": 0,
+            "solitarios": 0,
+            "compartidos": 0,
+            "grupales": 0,
+            "monto_solitario": 0.0,
+            "monto_compartido": 0.0,
+            "monto_grupal": 0.0,
+            "monto": 0.0,
+        },
+    )
+    return metricas_lavador, detalles
+
+
 def generar_excel_registros(df):
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
@@ -1968,6 +2485,15 @@ def generar_excel_registros(df):
         columns=[columna for columna, _ in COLUMNAS_EXPORTACION],
         fill_value="-",
     ).copy()
+    df_exportacion["Registrado por"] = df_exportacion[
+        "Registrado por"
+    ].map(
+        lambda valor: (
+            "No disponible"
+            if pd.isna(valor) or not str(valor).strip() or str(valor).strip() == "-"
+            else str(valor).strip()
+        )
+    )
     fechas_separadas = df_exportacion["Fecha"].map(separar_fecha_hora_registro)
     df_exportacion["Fecha"] = fechas_separadas.map(lambda valor: valor[0])
     df_exportacion["Hora"] = fechas_separadas.map(lambda valor: valor[1])
@@ -2058,13 +2584,14 @@ def validar_campos_gasto(precio_gasto, metodo_gasto):
 
 
 # --- INICIALIZAR ESQUEMA DE POSTGRESQL UNA VEZ POR SESIÓN ---
-if not st.session_state.get("_esquema_postgresql_inicializado", False):
+if st.session_state.get("_version_esquema_postgresql") != 3:
     try:
         inicializar_base_datos()
     except (OSError, ValueError, psycopg2.Error) as error:
         st.error(f"No se pudieron cargar los registros: {error}")
         st.stop()
     st.session_state["_esquema_postgresql_inicializado"] = True
+    st.session_state["_version_esquema_postgresql"] = 3
 
 def notificar_exito(mensaje, tipo="exito", destino=None):
     st.session_state.notificacion_exito = {
@@ -2124,6 +2651,21 @@ lista_lavadores = cargar_catalogo(
         "Marco",
     ],
 )
+if (
+    st.session_state.get("login_completado")
+    and st.session_state.get("admin_autorizado")
+    and lista_lavadores
+):
+    try:
+        personal_management.precargar_datos_gestion_personal(
+            lista_lavadores,
+            datetime.now(ZONA_HORARIA_PERU).date(),
+        )
+    except (psycopg2.Error, ValueError) as error:
+        st.warning(
+            "No se pudieron precargar los datos de Personal. "
+            f"Se consultarán al abrir el módulo: {error}"
+        )
 lista_tipos = cargar_catalogo(
     ARCHIVO_VEHICULOS, ["Auto", "Moto", "Motaxi", "Camioneta", "Bicicleta"]
 )
@@ -2248,6 +2790,30 @@ def mostrar_confirmacion_baja_personal(nombre):
 
 
 lista_pagos = ["Efectivo", "Tarjeta", "Yape", "Plin", "Transferencia"]
+OPCIONES_MOTIVO_GASTO = [
+    "-",
+    "AD. (Adelanto)",
+    "Almuerzo",
+    "Limpieza",
+    "Otros",
+]
+
+
+def es_motivo_adelanto(motivo):
+    return str(motivo or "").strip().casefold() in {
+        "ad.",
+        "ad. (adelanto)",
+    }
+
+
+def formatear_motivo_gasto(motivo, lavador):
+    motivo = str(motivo or "").strip()
+    if es_motivo_adelanto(motivo):
+        lavador = str(lavador or "").strip()
+        return f"AD. {lavador.upper()}" if lavador and lavador != "-" else "AD."
+    return motivo or "-"
+
+
 l1_opts = ["-", *lista_lavadores]
 l2_opts = ["-", *lista_lavadores]
 l3_opts = ["-", *lista_lavadores]
@@ -2264,6 +2830,7 @@ if "input_l1" not in st.session_state: st.session_state.input_l1 = "Carlos"
 if "input_l2" not in st.session_state: st.session_state.input_l2 = "-"
 if "input_l3" not in st.session_state: st.session_state.input_l3 = "-"
 if "input_motivo" not in st.session_state: st.session_state.input_motivo = "-"
+if "input_lavador_adelanto" not in st.session_state: st.session_state.input_lavador_adelanto = "-"
 if "input_precio_gasto" not in st.session_state: st.session_state.input_precio_gasto = "-"
 if "input_metodo_gasto" not in st.session_state: st.session_state.input_metodo_gasto = "-"
 if "input_ruc_cliente" not in st.session_state: st.session_state.input_ruc_cliente = ""
@@ -2300,6 +2867,7 @@ def restablecer_campos_formulario():
     st.session_state.input_l2 = "-"
     st.session_state.input_l3 = "-"
     st.session_state.input_motivo = "-"
+    st.session_state.input_lavador_adelanto = "-"
     st.session_state.input_precio_gasto = "-"
     st.session_state.input_metodo_gasto = "-"
     st.session_state.input_ruc_cliente = ""
@@ -2317,6 +2885,10 @@ def limpiar_formulario():
     st.session_state.resetear_formulario = True
 
 def cambiar_fecha_tabla():
+    reiniciar_seleccion_tabla()
+
+
+def reiniciar_seleccion_tabla():
     st.session_state.revision_tabla_fecha += 1
     if st.session_state.edit_id:
         st.session_state.edit_id = None
@@ -2330,6 +2902,15 @@ def cargar_fila_en_formulario(fila_data):
 
     st.session_state.registro_cargado_id = registro_id
     st.session_state.edit_id = registro_id
+    fecha_original = parsear_fecha(fila_data["Fecha"])
+    if pd.isna(fecha_original):
+        st.session_state.fecha_edicion_registro = datetime.now(
+            ZONA_HORARIA_PERU
+        ).date()
+        st.session_state.fecha_edicion_hora_original = None
+    else:
+        st.session_state.fecha_edicion_registro = fecha_original.date()
+        st.session_state.fecha_edicion_hora_original = fecha_original
     st.session_state.input_tipo = fila_data['Tipo'] if fila_data['Tipo'] in lista_tipos else lista_tipos[0]
     st.session_state.input_placa = str(fila_data['Placa'])
     st.session_state.input_servicio = fila_data['Servicio'] if fila_data['Servicio'] in lista_servicios else lista_servicios[0]
@@ -2345,7 +2926,19 @@ def cargar_fila_en_formulario(fila_data):
     )
     st.session_state.input_l2 = fila_data['Lavador 2'] if fila_data['Lavador 2'] in l2_opts else "-"
     st.session_state.input_l3 = fila_data['Lavador 3'] if fila_data['Lavador 3'] in l3_opts else "-"
-    st.session_state.input_motivo = "" if pd.isna(fila_data['Motivo Gasto']) or str(fila_data['Motivo Gasto']).strip() == "-" else str(fila_data['Motivo Gasto'])
+    motivo_guardado = (
+        ""
+        if pd.isna(fila_data["Motivo Gasto"])
+        or str(fila_data["Motivo Gasto"]).strip() == "-"
+        else str(fila_data["Motivo Gasto"]).strip()
+    )
+    st.session_state.input_lavador_adelanto = "-"
+    for lavador in lista_lavadores:
+        if motivo_guardado.casefold() == f"ad. {lavador}".casefold():
+            motivo_guardado = "AD."
+            st.session_state.input_lavador_adelanto = lavador
+            break
+    st.session_state.input_motivo = motivo_guardado or "-"
     precio_gasto = str(fila_data['Precio Gasto']).replace("S/", "").strip()
     st.session_state.input_precio_gasto = "" if precio_gasto.casefold() in {"", "-", "nan", "none"} else precio_gasto
     metodo_gasto = str(fila_data['Método Gasto']).strip()
@@ -2360,26 +2953,39 @@ def cargar_fila_en_formulario(fila_data):
     st.session_state.input_correo_cliente = "" if correo_cliente.casefold() in {"", "-", "nan", "none"} else correo_cliente
 
 # --- NAVEGACIÓN Y VISTAS ---
-opciones_navegacion = ["Registros", "Gestión", "Control", "Finanzas"]
+opciones_navegacion = [
+    "Registros",
+    "Gestión",
+    "Control",
+    "Finanzas",
+    "Personal",
+]
+opciones_navegacion_validas = [*opciones_navegacion, "Gestión de Personal"]
 claves_navegacion = {
     "Registros": "registros",
     "Gestión": "gestion",
     "Control": "control",
     "Finanzas": "finanzas",
+    "Personal": "personal",
 }
-if st.session_state.get("menu_activo") not in opciones_navegacion:
+iconos_navegacion = {
+    "Registros": ":material/receipt_long:",
+    "Gestión": ":material/settings:",
+    "Control": ":material/verified_user:",
+    "Finanzas": ":material/account_balance_wallet:",
+    "Personal": ":material/groups:",
+}
+if st.session_state.get("menu_activo") not in opciones_navegacion_validas:
     menu_anterior = st.session_state.get(
         "menu_activo", st.session_state.get("seccion_navegacion")
     )
-    menu_anterior = {
-        "Personal": "Gestión",
-        "Ajustes": "Control",
-        "Caja": "Finanzas",
-    }.get(
+    menu_anterior = {"Ajustes": "Control", "Caja": "Finanzas"}.get(
         menu_anterior, menu_anterior
     )
     st.session_state.menu_activo = (
-        menu_anterior if menu_anterior in opciones_navegacion else "Registros"
+        menu_anterior
+        if menu_anterior in opciones_navegacion_validas
+        else "Registros"
     )
 
 
@@ -2391,25 +2997,873 @@ st.sidebar.markdown(
     f'<div class="sidebar-logo-container"><img src="data:image/png;base64,{logo_base64}" alt="The Bunker Car Wash"></div>',
     unsafe_allow_html=True,
 )
-st.sidebar.markdown(
+st.markdown(
+    f"""
+    <style>
+    [data-testid="stSidebar"]::before {{
+        background-image:
+            linear-gradient(
+                180deg,
+                #081421 0%,
+                rgba(8, 20, 33, 0.46) 28%,
+                rgba(5, 13, 23, 0.42) 100%
+            ),
+            url("data:image/png;base64,{imagen_auto_sidebar_base64}");
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
     """
     <style>
-    [data-testid="stSidebar"] .st-key-navegacion_registros [data-testid^="stBaseButton-"],
-    [data-testid="stSidebar"] .st-key-navegacion_gestion [data-testid^="stBaseButton-"],
-    [data-testid="stSidebar"] .st-key-navegacion_control [data-testid^="stBaseButton-"],
-    [data-testid="stSidebar"] .st-key-navegacion_finanzas [data-testid^="stBaseButton-"] {
-        min-height: 46px;
-        border-radius: 12px;
-        justify-content: flex-start;
-        padding-left: 1rem;
-        font-weight: 600;
-        transition: background-color 140ms ease, border-color 140ms ease;
+    :root {
+        color-scheme: dark;
+        --bunker-bg: #07111e;
+        --bunker-panel: #0c1929;
+        --bunker-panel-raised: #101f31;
+        --bunker-border: #26394f;
+        --bunker-text: #f4f7fb;
+        --bunker-muted: #a7b8cd;
+        --bunker-red: #ff3545;
+        --bunker-red-deep: #c91f31;
     }
-    [data-testid="stSidebar"] .st-key-navegacion_registros [data-testid="stBaseButton-secondary"],
-    [data-testid="stSidebar"] .st-key-navegacion_gestion [data-testid="stBaseButton-secondary"],
-    [data-testid="stSidebar"] .st-key-navegacion_control [data-testid="stBaseButton-secondary"],
-    [data-testid="stSidebar"] .st-key-navegacion_finanzas [data-testid="stBaseButton-secondary"] {
-        border: 1px solid rgba(128, 128, 128, 0.35);
+    html, body, .stApp, [data-testid="stAppViewContainer"] {
+        background-color: var(--bunker-bg) !important;
+        color: var(--bunker-text) !important;
+    }
+    .stApp {
+        background-image:
+            radial-gradient(ellipse at 80% 0%, rgba(34, 63, 94, 0.17), transparent 42%),
+            linear-gradient(145deg, #07111e, #081321 58%, #060e19) !important;
+    }
+    body:not(:has(#registros-theme-marker)) .main-header-logo {
+        display: none !important;
+    }
+    html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        max-width: 100%;
+        overflow-x: hidden !important;
+    }
+    .stApp [data-testid="stMain"] {
+        color: var(--bunker-text);
+    }
+    .stApp [data-testid="stMainBlockContainer"] {
+        max-width: 1560px;
+        padding-right: clamp(1rem, 2.6vw, 2.8rem);
+        padding-left: clamp(1rem, 2.6vw, 2.8rem);
+    }
+    [data-testid="stSidebar"] {
+        position: relative;
+        isolation: isolate;
+        width: 268px !important;
+        min-width: 268px !important;
+        border-right: 1px solid rgba(96, 122, 151, 0.2);
+        background-color: #081421 !important;
+        background-attachment: fixed !important;
+    }
+    [data-testid="stSidebar"][aria-expanded="false"] {
+        width: 0 !important;
+        min-width: 0 !important;
+        flex: 0 0 0 !important;
+    }
+    [data-testid="stSidebar"]::before {
+        position: absolute;
+        z-index: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        height: 38%;
+        min-height: 230px;
+        content: "";
+        pointer-events: none;
+        filter: grayscale(1) brightness(0.62) sepia(0.3) hue-rotate(175deg)
+            saturate(0.85);
+        background-size: cover;
+        background-position: center 54%;
+        background-repeat: no-repeat;
+    }
+    [data-testid="stSidebar"]::after {
+        position: absolute;
+        z-index: 1;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        height: 72px;
+        pointer-events: none;
+        background: linear-gradient(
+            130deg,
+            transparent 0 8%,
+            #52657a 8% 12%,
+            transparent 12% 17%,
+            var(--bunker-red) 17% 23%,
+            transparent 23% 28%,
+            #52657a 28% 32%,
+            transparent 32% 100%
+        );
+        clip-path: polygon(0 100%, 24% 0, 37% 0, 13% 100%, 100% 100%);
+        content: "";
+        opacity: 0.9;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        position: relative;
+        z-index: 2;
+        min-height: 100%;
+        background: transparent;
+    }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.22rem;
+    }
+    .sidebar-logo-container {
+        position: relative;
+        z-index: 1;
+        min-height: 174px;
+        align-items: center;
+        padding: 0.8rem 0.5rem 1rem;
+        border-bottom: 1px solid rgba(96, 122, 151, 0.16);
+    }
+    .sidebar-logo-container::before {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: min(86%, 212px);
+        height: 126px;
+        border: 1px solid rgba(255, 53, 69, 0.32);
+        border-radius: 50%;
+        content: "";
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+    }
+    .sidebar-logo-container img {
+        position: relative;
+        z-index: 1;
+        width: 94%;
+        max-width: 216px;
+        filter: drop-shadow(0 5px 12px rgba(0, 0, 0, 0.45));
+    }
+    [data-testid="stSidebar"] .st-key-navegacion_registros,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion,
+    [data-testid="stSidebar"] .st-key-navegacion_control,
+    [data-testid="stSidebar"] .st-key-navegacion_finanzas,
+    [data-testid="stSidebar"] .st-key-navegacion_personal,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion_personal {
+        position: relative;
+        z-index: 2;
+        margin: 0;
+    }
+    [data-testid="stSidebar"] .st-key-navegacion_registros button,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion button,
+    [data-testid="stSidebar"] .st-key-navegacion_control button,
+    [data-testid="stSidebar"] .st-key-navegacion_finanzas button,
+    [data-testid="stSidebar"] .st-key-navegacion_personal button,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion_personal button {
+        min-height: 54px !important;
+        border: 1px solid rgba(111, 137, 166, 0.24) !important;
+        border-radius: 0 9px 0 9px !important;
+        background: rgba(9, 22, 36, 0.9) !important;
+        color: #c6d2e3 !important;
+        -webkit-text-fill-color: #c6d2e3 !important;
+        font-size: 0.96rem !important;
+        font-weight: 650 !important;
+        justify-content: flex-start !important;
+        padding-left: 1.05rem !important;
+        clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 13px 100%, 0 calc(100% - 13px));
+        transition: background-color 160ms ease, border-color 160ms ease,
+            color 160ms ease, transform 160ms ease, box-shadow 160ms ease !important;
+    }
+    [data-testid="stSidebar"] .st-key-navegacion_registros button:hover,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion button:hover,
+    [data-testid="stSidebar"] .st-key-navegacion_control button:hover,
+    [data-testid="stSidebar"] .st-key-navegacion_finanzas button:hover,
+    [data-testid="stSidebar"] .st-key-navegacion_personal button:hover,
+    [data-testid="stSidebar"] .st-key-navegacion_gestion_personal button:hover {
+        transform: translateX(3px);
+        border-color: rgba(255, 53, 69, 0.62) !important;
+        background: rgba(23, 43, 65, 0.98) !important;
+        color: #fff !important;
+        -webkit-text-fill-color: #fff !important;
+    }
+    [data-testid="stSidebar"] .st-key-navegacion_registros [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .st-key-navegacion_gestion [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .st-key-navegacion_control [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .st-key-navegacion_finanzas [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .st-key-navegacion_personal [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .st-key-navegacion_gestion_personal [data-testid="stBaseButton-primary"] {
+        border-color: #ff3545 !important;
+        background: linear-gradient(110deg, #ef293e, #ff3545) !important;
+        color: #fff !important;
+        -webkit-text-fill-color: #fff !important;
+        box-shadow: 0 6px 20px rgba(255, 53, 69, 0.22);
+    }
+    [data-testid="stSidebar"] .st-key-navegacion_gestion_personal {
+        margin: 0;
+    }
+    [data-testid="stSidebar"] [data-testid^="stBaseButton-"] [data-testid="stIconMaterial"],
+    [data-testid="stSidebar"] [data-testid^="stBaseButton-"] svg {
+        color: currentColor !important;
+        fill: currentColor !important;
+    }
+    .bunker-page-heading {
+        position: relative;
+        isolation: isolate;
+        margin: 0.35rem 0 1.35rem;
+        padding: 0.15rem 5rem 0.25rem 0;
+    }
+    .bunker-page-heading::before {
+        display: block;
+        width: 2.4rem;
+        height: 4px;
+        margin-bottom: 0.6rem;
+        border-radius: 4px;
+        background: var(--bunker-red);
+        content: "";
+        box-shadow: 0 0 14px rgba(255, 53, 69, 0.26);
+    }
+    .bunker-page-heading::after {
+        position: absolute;
+        top: -0.6rem;
+        right: 0;
+        width: 4.25rem;
+        height: 2.7rem;
+        pointer-events: none;
+        background: linear-gradient(
+            130deg,
+            transparent 0 24%,
+            #334a62 24% 40%,
+            transparent 40% 52%,
+            var(--bunker-red) 52% 62%,
+            transparent 62% 100%
+        );
+        clip-path: polygon(32% 0, 100% 0, 67% 100%, 0 100%);
+        content: "";
+        opacity: 0.9;
+    }
+    .bunker-page-heading h1 {
+        margin: 0 !important;
+        color: var(--bunker-text) !important;
+        font-size: clamp(1.8rem, 3vw, 2.65rem) !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.04em !important;
+        line-height: 1.08 !important;
+        text-transform: uppercase;
+    }
+    .bunker-page-heading h1 .bunker-title-accent {
+        color: var(--bunker-red);
+    }
+    .bunker-page-heading p {
+        margin: 0.45rem 0 0;
+        color: var(--bunker-muted);
+        font-size: 0.94rem;
+    }
+    .stApp h2, .stApp h3, .stApp h4 {
+        color: #f0f4fa !important;
+        letter-spacing: -0.025em;
+    }
+    .stApp [data-testid="stCaptionContainer"],
+    .stApp [data-testid="stMarkdownContainer"] p,
+    .stApp [data-testid="stText"] {
+        color: var(--bunker-muted);
+    }
+    .stApp [data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1px solid rgba(77, 102, 131, 0.42) !important;
+        border-radius: 13px !important;
+        background: linear-gradient(145deg, rgba(15, 30, 48, 0.94), rgba(9, 22, 37, 0.96)) !important;
+        box-shadow: inset 0 1px 0 rgba(185, 207, 232, 0.025),
+            0 8px 22px rgba(0, 0, 0, 0.12);
+    }
+    .stApp [data-testid="stExpander"] {
+        border: 1px solid var(--bunker-border) !important;
+        border-radius: 11px !important;
+        background: rgba(12, 25, 41, 0.82) !important;
+    }
+    .stApp [data-testid="stExpander"] summary,
+    .stApp [data-testid="stExpander"] summary span {
+        color: #dbe5f2 !important;
+    }
+    .stApp .reportes-kpi-panel,
+    .stApp .finanzas-balance-card {
+        position: relative;
+        isolation: isolate;
+        overflow: hidden;
+        border: 1px solid rgba(50, 76, 104, 0.72) !important;
+        border-radius: 14px !important;
+        background: linear-gradient(145deg, #0c1929, #091522 78%) !important;
+        box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16) !important;
+    }
+    .stApp .reportes-kpi-panel::after {
+        position: absolute;
+        top: auto;
+        right: 0;
+        bottom: 0;
+        z-index: 0;
+        width: 58px;
+        height: 30px;
+        pointer-events: none;
+        background: linear-gradient(
+            130deg,
+            transparent 0 30%,
+            #30445a 30% 43%,
+            transparent 43% 54%,
+            var(--bunker-red) 54% 64%,
+            transparent 64% 100%
+        );
+        clip-path: polygon(35% 0, 100% 0, 65% 100%, 0 100%);
+        content: "";
+        opacity: 0.72;
+    }
+    .stApp .reportes-kpi-header,
+    .stApp .reportes-kpi-grid,
+    .stApp .personal-resumen-grid,
+    .stApp .finanzas-kpi-grid {
+        position: relative;
+        z-index: 1;
+    }
+    .stApp .reportes-kpi-heading {
+        color: #f0f4fa !important;
+        font-size: 1rem;
+    }
+    .stApp .reportes-kpi-periodo {
+        border-color: rgba(255, 53, 69, 0.32) !important;
+        background: rgba(255, 53, 69, 0.1) !important;
+        color: #ff9da5 !important;
+    }
+    .stApp .reportes-kpi-card {
+        border: 1px solid rgba(76, 103, 132, 0.62) !important;
+        border-radius: 10px !important;
+        background: linear-gradient(145deg, rgba(19, 35, 54, 0.98), rgba(10, 23, 38, 0.98)) !important;
+    }
+    .stApp .reportes-kpi-icono {
+        display: grid;
+        width: 2.4rem;
+        height: 2.4rem;
+        place-items: center;
+        border: 1px solid currentColor;
+        border-radius: 50%;
+        background: color-mix(in srgb, currentColor 14%, transparent);
+        margin-bottom: 0.45rem;
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.total {
+        --card-accent: #ffb52e;
+        background: linear-gradient(145deg, rgba(42, 37, 22, 0.98), rgba(18, 24, 32, 0.98)) !important;
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.acumulado,
+    .stApp .personal-ingresos-panel .finanzas-metodo-efectivo {
+        --card-accent: #20d38a;
+        background: linear-gradient(145deg, rgba(10, 44, 39, 0.96), rgba(10, 26, 37, 0.98)) !important;
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.compartido,
+    .stApp .personal-ingresos-panel .finanzas-metodo-yape {
+        --card-accent: #36b8ff;
+        background: linear-gradient(145deg, rgba(10, 38, 60, 0.96), rgba(10, 25, 42, 0.98)) !important;
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.grupal,
+    .stApp .personal-ingresos-panel .finanzas-metodo-plin {
+        --card-accent: #a46bff;
+        background: linear-gradient(145deg, rgba(36, 25, 63, 0.96), rgba(15, 24, 44, 0.98)) !important;
+    }
+    .stApp .personal-ingresos-panel .finanzas-metodo-transferencia {
+        --card-accent: #ff3545;
+        --finanzas-metodo-color: #ff3545;
+        border-color: rgba(255, 53, 69, 0.76) !important;
+        background: linear-gradient(145deg, rgba(75, 25, 35, 0.96), rgba(34, 20, 33, 0.98)) !important;
+        box-shadow: 0 0 18px rgba(255, 53, 69, 0.1);
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.total .reportes-kpi-acento,
+    .stApp .personal-resumen-grid .reportes-kpi-card.acumulado .reportes-kpi-acento,
+    .stApp .personal-resumen-grid .reportes-kpi-card.compartido .reportes-kpi-acento,
+    .stApp .personal-resumen-grid .reportes-kpi-card.grupal .reportes-kpi-acento,
+    .stApp .personal-ingresos-panel .reportes-kpi-card .reportes-kpi-acento {
+        background: var(--card-accent) !important;
+    }
+    .stApp .personal-resumen-grid .reportes-kpi-card.total .reportes-kpi-icono,
+    .stApp .personal-resumen-grid .reportes-kpi-card.total .reportes-kpi-acento { color: #ffb52e; }
+    .stApp .personal-resumen-grid .reportes-kpi-card.acumulado .reportes-kpi-icono,
+    .stApp .personal-ingresos-panel .finanzas-metodo-efectivo .reportes-kpi-icono { color: #20d38a; }
+    .stApp .personal-resumen-grid .reportes-kpi-card.compartido .reportes-kpi-icono,
+    .stApp .personal-ingresos-panel .finanzas-metodo-yape .reportes-kpi-icono { color: #36b8ff; }
+    .stApp .personal-resumen-grid .reportes-kpi-card.grupal .reportes-kpi-icono,
+    .stApp .personal-ingresos-panel .finanzas-metodo-plin .reportes-kpi-icono { color: #a46bff; }
+    .stApp .personal-ingresos-panel .finanzas-metodo-transferencia .reportes-kpi-icono { color: #ff705f; }
+    .stApp .reportes-kpi-etiqueta,
+    .stApp .reportes-kpi-unidad,
+    .stApp .finanzas-balance-etiqueta { color: #a7b8cd !important; }
+    .stApp .reportes-kpi-valor,
+    .stApp .finanzas-balance-valor { color: #f7f9fc !important; }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-grid {
+        gap: 1rem;
+        margin: 0.85rem 0 1.15rem;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        min-height: 7rem;
+        padding: 1.15rem 1.25rem;
+        border-color: #28506b !important;
+        border-radius: 15px !important;
+        background: linear-gradient(120deg, #0d2033, #0a1727 75%) !important;
+        box-shadow: inset 0 1px 0 rgba(190, 215, 240, 0.04),
+            0 8px 24px rgba(0, 0, 0, 0.14) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card::before {
+        height: 3px;
+        background: #24b9ed;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card.gasto {
+        border-color: rgba(255, 83, 97, 0.52) !important;
+        background: linear-gradient(120deg, #281b2a, #111a2a 78%) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card.gasto::before {
+        background: #ff5361;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card::after {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 62px;
+        height: 37px;
+        pointer-events: none;
+        background: linear-gradient(
+            130deg,
+            transparent 0 28%,
+            #30475e 28% 44%,
+            transparent 44% 55%,
+            #ff3545 55% 67%,
+            transparent 67% 100%
+        );
+        clip-path: polygon(35% 0, 100% 0, 65% 100%, 0 100%);
+        content: "";
+        opacity: 0.86;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-icon {
+        display: grid;
+        flex: 0 0 3.4rem;
+        width: 3.4rem;
+        height: 3.4rem;
+        place-items: center;
+        border: 1px solid rgba(54, 190, 235, 0.68);
+        border-radius: 50%;
+        background: rgba(21, 155, 199, 0.1);
+        color: #73d7f5;
+        font-family: "Material Symbols Rounded";
+        font-feature-settings: "liga";
+        font-size: 1.65rem;
+        line-height: 1;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-card.gasto .finanzas-balance-icon {
+        border-color: rgba(255, 83, 97, 0.62);
+        background: rgba(255, 53, 69, 0.1);
+        color: #ff7882;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-content {
+        position: relative;
+        z-index: 1;
+        min-width: 0;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-etiqueta {
+        color: #b8cbe0 !important;
+        font-size: 0.9rem;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-balance-valor {
+        margin-top: 0.12rem;
+        font-size: clamp(1.8rem, 3vw, 2.3rem);
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpander"] {
+        margin: 0.8rem 0 1rem;
+        overflow: hidden;
+        border: 1px solid #254865 !important;
+        border-radius: 13px !important;
+        background: linear-gradient(145deg, #0b1b2d, #081522) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpander"] details {
+        border: 0 !important;
+        background: transparent !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpander"] summary {
+        min-height: 3.1rem;
+        padding: 0.15rem 1rem !important;
+        border-bottom: 1px solid rgba(57, 91, 122, 0.42);
+        background: linear-gradient(100deg, #10263c, #0c1d30) !important;
+        color: #e7f0fa !important;
+        transition: background-color 150ms ease, border-color 150ms ease;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpander"] summary:hover {
+        border-bottom-color: rgba(42, 183, 231, 0.55);
+        background: linear-gradient(100deg, #15304a, #10243a) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpander"] summary [data-testid="stIconMaterial"] {
+        color: #6bcdf0 !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stExpanderDetails"] {
+        padding: 0.6rem 0.8rem 0.8rem;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        align-items: stretch;
+        gap: 0.8rem;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel {
+        padding: 0.7rem;
+        border: 1px solid rgba(80, 105, 132, 0.62) !important;
+        border-radius: 16px !important;
+        background: #07111e !important;
+        box-shadow: inset 0 1px 0 rgba(180, 205, 230, 0.025),
+            0 8px 20px rgba(0, 0, 0, 0.16) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel {
+        border-color: rgba(53, 136, 171, 0.55) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel {
+        border-color: rgba(105, 69, 83, 0.62) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .reportes-kpi-header,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .reportes-kpi-header {
+        margin: 0 0 0.75rem;
+        padding: 0.55rem 0.7rem;
+        border: 1px solid rgba(74, 101, 130, 0.38);
+        border-radius: 8px;
+        background: linear-gradient(100deg, #102238, #0a1929);
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        min-width: 0;
+        min-height: 10rem;
+        padding: 0.9rem 1rem 0.8rem;
+        border: 1px solid color-mix(
+            in srgb,
+            var(--finanzas-metodo-color) 58%,
+            #0d1b2b
+        ) !important;
+        border-radius: 11px !important;
+        background: linear-gradient(145deg, #102238, #0d1b2b 78%) !important;
+        box-shadow: inset 0 1px 0 rgba(196, 217, 239, 0.035);
+        transition: transform 200ms ease, border-color 200ms ease,
+            box-shadow 200ms ease, background-color 200ms ease;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-icono,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-icono {
+        display: grid;
+        flex: 0 0 2.65rem;
+        width: 2.65rem;
+        height: 2.65rem;
+        place-items: center;
+        border: 1px solid var(--finanzas-metodo-color);
+        border-radius: 50%;
+        background: color-mix(in srgb, var(--finanzas-metodo-color) 11%, #0d1b2b);
+        margin: 0 0 0.55rem;
+        color: var(--finanzas-metodo-color) !important;
+        font-size: 1.2rem;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-acento,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-acento {
+        z-index: 1;
+        height: 4px;
+        background: var(--finanzas-metodo-color) !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-etiqueta,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-etiqueta {
+        max-width: 100%;
+        margin-bottom: 0.2rem;
+        color: #c5d2e1 !important;
+        font-size: 0.84rem;
+        font-weight: 600;
+        white-space: normal;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-valor,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-valor {
+        max-width: 100%;
+        margin: 0.1rem 0 0.25rem;
+        color: #f7f9fc !important;
+        font-size: clamp(1.35rem, 2.15vw, 1.9rem);
+        font-variant-numeric: tabular-nums;
+        font-weight: 800;
+        letter-spacing: -0.035em;
+        line-height: 1.16;
+        overflow-wrap: anywhere;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-unidad,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card .reportes-kpi-unidad {
+        margin-top: auto;
+        color: #9aadc3 !important;
+        font-size: 0.72rem;
+        line-height: 1.25;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card:hover,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card:hover,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid .finanzas-metodo-card:focus-visible,
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid .finanzas-metodo-card:focus-visible {
+        border-color: var(--finanzas-metodo-color) !important;
+        box-shadow: 0 5px 14px color-mix(
+            in srgb,
+            var(--finanzas-metodo-color) 16%,
+            transparent
+        ), inset 0 1px 0 rgba(196, 217, 239, 0.05);
+        outline: none;
+        transform: translateY(-2px);
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-income-panel .reportes-kpi-periodo {
+        border-color: rgba(54, 190, 235, 0.42) !important;
+        background: rgba(21, 155, 199, 0.12) !important;
+        color: #73d7f5 !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel::after {
+        opacity: 0.94;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-expense-panel .reportes-kpi-heading {
+        color: #ffe6e8 !important;
+    }
+    .stApp:has(#finanzas-theme-marker) .finanzas-expense-panel .reportes-kpi-periodo {
+        border-color: rgba(255, 83, 97, 0.38) !important;
+        background: rgba(255, 53, 69, 0.12) !important;
+        color: #ff9da5 !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stMain"] h3 {
+        position: relative;
+        margin-top: 1.35rem;
+        padding-top: 0.4rem;
+        color: #f3f7fc !important;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stMain"] h3::before {
+        display: block;
+        width: 2rem;
+        height: 3px;
+        margin-bottom: 0.45rem;
+        border-radius: 3px;
+        background: #25b9eb;
+        content: "";
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stMain"] h3:has(+ [data-testid="stElementContainer"] .st-key-fecha_referencia_gastos_finanzas)::before {
+        background: #ff5361;
+    }
+    .stApp:has(#finanzas-theme-marker) [data-testid="stMain"] #balance-de-gastos::before {
+        background: #ff5361;
+    }
+    .stApp [data-testid="stTextInput"] label,
+    .stApp [data-testid="stSelectbox"] label,
+    .stApp [data-testid="stNumberInput"] label,
+    .stApp [data-testid="stDateInput"] label,
+    .stApp [data-testid="stTimeInput"] label,
+    .stApp [data-testid="stMultiSelect"] label {
+        color: #b5c4d7 !important;
+        font-weight: 600 !important;
+    }
+    .stApp [data-testid="stTextInput"] input,
+    .stApp [data-testid="stNumberInput"] input,
+    .stApp [data-testid="stDateInput"] input,
+    .stApp [data-testid="stTimeInput"] input,
+    .stApp [data-testid="stSelectbox"] [role="group"],
+    .stApp [data-testid="stSelectbox"] [role="combobox"],
+    .stApp [data-testid="stMultiSelect"] [role="group"],
+    .stApp [data-testid="stMultiSelect"] [role="combobox"] {
+        border: 1px solid #30465f !important;
+        border-radius: 7px !important;
+        background-color: #101f31 !important;
+        color: #f1f5fb !important;
+        -webkit-text-fill-color: #f1f5fb !important;
+        box-shadow: none !important;
+    }
+    .stApp [data-testid="stTextInput"] input::placeholder,
+    .stApp [data-testid="stNumberInput"] input::placeholder {
+        color: #8194ab !important;
+        -webkit-text-fill-color: #8194ab !important;
+    }
+    .stApp [data-testid="stTextInput"] input:focus,
+    .stApp [data-testid="stNumberInput"] input:focus,
+    .stApp [data-testid="stDateInput"] input:focus,
+    .stApp [data-testid="stSelectbox"] [role="combobox"]:focus,
+    .stApp [data-testid="stMultiSelect"] [role="combobox"]:focus {
+        border-color: #ff5361 !important;
+        box-shadow: 0 0 0 2px rgba(255, 53, 69, 0.16) !important;
+    }
+    .stApp .st-key-input_placa [data-testid="stTextInput"] input,
+    .stApp .st-key-input_ruc_cliente [data-testid="stTextInput"] input,
+    .stApp .st-key-input_razon_social_cliente [data-testid="stTextInput"] input,
+    .stApp .st-key-input_numero_cliente [data-testid="stTextInput"] input,
+    .stApp .st-key-input_correo_cliente [data-testid="stTextInput"] input {
+        background-color: #101f31 !important;
+        color: #f1f5fb !important;
+        -webkit-text-fill-color: #f1f5fb !important;
+    }
+    .stApp .st-key-input_tipo [data-testid="stSelectbox"] [role="combobox"],
+    .stApp .st-key-input_pago [data-testid="stSelectbox"] [role="combobox"],
+    .stApp .st-key-input_motivo [data-testid="stSelectbox"] [role="combobox"],
+    .stApp .st-key-input_metodo_gasto [data-testid="stSelectbox"] [role="combobox"] {
+        background-color: #101f31 !important;
+        color: #f1f5fb !important;
+        -webkit-text-fill-color: #f1f5fb !important;
+    }
+    .stApp [data-testid="stSelectbox"] [role="group"] button,
+    .stApp [data-testid="stDateInput"] button {
+        border-color: #a92132 !important;
+        background: #c92337 !important;
+        color: #fff !important;
+    }
+    .stApp [data-testid$="VirtualDropdown"] {
+        border: 1px solid #30465f !important;
+        border-radius: 8px !important;
+        background: #101f31 !important;
+        color: #f1f5fb !important;
+    }
+    .stApp [data-testid$="VirtualDropdown"] [role="option"],
+    .stApp [data-testid$="VirtualDropdown"] [role="option"] [data-item-hl] {
+        background: transparent !important;
+        color: #e4edf8 !important;
+        -webkit-text-fill-color: #e4edf8 !important;
+    }
+    .stApp [data-testid$="VirtualDropdown"] [role="option"][aria-selected="true"],
+    .stApp [data-testid$="VirtualDropdown"] [role="option"][data-focused="true"] {
+        background: rgba(255, 53, 69, 0.18) !important;
+    }
+    .stApp [data-testid$="VirtualDropdown"]:not(
+        :has([role="listbox"][aria-label="Mes"])
+    ):not(:has([role="listbox"][aria-label="Año"])),
+    .stApp [data-testid$="VirtualDropdown"]:not(
+        :has([role="listbox"][aria-label="Mes"])
+    ):not(:has([role="listbox"][aria-label="Año"])) [role="listbox"] {
+        border-color: #30465f !important;
+        background: #101f31 !important;
+        color: #f1f5fb !important;
+    }
+    .stApp [data-testid$="VirtualDropdown"]:not(
+        :has([role="listbox"][aria-label="Mes"])
+    ):not(:has([role="listbox"][aria-label="Año"]))
+    [role="option"],
+    .stApp [data-testid$="VirtualDropdown"]:not(
+        :has([role="listbox"][aria-label="Mes"])
+    ):not(:has([role="listbox"][aria-label="Año"]))
+    [role="option"] [data-item-hl] {
+        background: transparent !important;
+        color: #e4edf8 !important;
+        -webkit-text-fill-color: #e4edf8 !important;
+    }
+    .stApp [class*="_popover_calendario"] [data-testid="stPopoverButton"] {
+        border-color: #344a62 !important;
+        background: #101f31 !important;
+        color: #e4edf8 !important;
+    }
+    .stApp [class*="_popover_calendario"] [data-testid="stPopoverButton"]:hover {
+        border-color: #ff5361 !important;
+        background: #17283c !important;
+    }
+    .stApp [data-testid="stPopoverBody"]:has([class*="_mes_calendario"])
+    [data-testid="stSelectbox"] [role="group"],
+    .stApp [data-testid="stPopoverBody"]:has([class*="_mes_calendario"])
+    [data-testid="stSelectbox"] [role="combobox"] {
+        background-color: #101f31 !important;
+        color: #f1f5fb !important;
+        -webkit-text-fill-color: #f1f5fb !important;
+    }
+    .stApp [data-testid="stBaseButton-primary"],
+    .stApp [data-testid="stFormSubmitButton"] button {
+        border: 1px solid #ff3545 !important;
+        border-radius: 8px !important;
+        background: linear-gradient(110deg, #e8273b, #ff3545) !important;
+        color: #fff !important;
+        -webkit-text-fill-color: #fff !important;
+        font-weight: 700 !important;
+        transition: transform 150ms ease, box-shadow 150ms ease,
+            filter 150ms ease !important;
+    }
+    .stApp [data-testid="stBaseButton-primary"]:hover,
+    .stApp [data-testid="stFormSubmitButton"] button:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.08);
+        box-shadow: 0 6px 18px rgba(255, 53, 69, 0.18);
+    }
+    .stApp [data-testid="stBaseButton-secondary"] {
+        border: 1px solid #344a62 !important;
+        border-radius: 8px !important;
+        background: #112137 !important;
+        color: #d7e2f0 !important;
+        -webkit-text-fill-color: #d7e2f0 !important;
+        transition: background-color 150ms ease, border-color 150ms ease !important;
+    }
+    .stApp [data-testid="stBaseButton-secondary"]:hover {
+        border-color: #637c98 !important;
+        background: #182b43 !important;
+    }
+    .stApp .st-key-cambiar_fecha_seleccionados [data-testid="stBaseButton-primary"] {
+        border-color: #27b978 !important;
+        background: linear-gradient(110deg, #128653, #20b875) !important;
+    }
+    .stApp .st-key-eliminar_registros_seleccionados [data-testid="stBaseButton-primary"] {
+        border-color: #ff3545 !important;
+        background: linear-gradient(110deg, #c91f31, #ff3545) !important;
+    }
+    .stApp [data-testid="stAlertContainer"] {
+        border: 1px solid #314961 !important;
+        border-radius: 9px !important;
+        background: #102137 !important;
+        color: #d9e6f4 !important;
+        box-shadow: none !important;
+    }
+    .stApp [data-testid="stAlertContainer"] p,
+    .stApp [data-testid="stAlertContainer"] svg {
+        color: inherit !important;
+        fill: currentColor !important;
+        stroke: currentColor !important;
+    }
+    .stApp [data-testid="stTabs"] [role="tablist"] {
+        border-bottom: 1px solid #26394f;
+    }
+    .stApp [data-testid="stTabs"] [role="tab"] {
+        color: #a7b8cd !important;
+    }
+    .stApp [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+        color: #fff !important;
+        border-bottom-color: var(--bunker-red) !important;
+    }
+    .stApp hr {
+        border-color: rgba(92, 117, 145, 0.32) !important;
+    }
+    @media (max-width: 900px) {
+        [data-testid="stSidebar"] {
+            width: min(268px, 82vw) !important;
+            min-width: min(268px, 82vw) !important;
+        }
+        .stApp [data-testid="stMainBlockContainer"] {
+            padding-right: 1rem;
+            padding-left: 1rem;
+        }
+        .stApp .personal-resumen-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stApp .finanzas-balance-grid {
+            grid-template-columns: 1fr;
+        }
+        .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid,
+        .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+    }
+    @media (max-width: 560px) {
+        .bunker-page-heading {
+            padding-right: 3rem;
+        }
+        .bunker-page-heading::after {
+            width: 2.8rem;
+            height: 1.8rem;
+        }
+        .stApp .reportes-kpi-grid,
+        .stApp .personal-resumen-grid,
+        .stApp .finanzas-kpi-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-income-panel .finanzas-kpi-grid,
+        .stApp:has(#finanzas-theme-marker) .reportes-kpi-panel.finanzas-expense-panel .finanzas-kpi-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stApp .reportes-kpi-panel {
+            padding: 0.75rem;
+        }
+        .stApp .reportes-kpi-header {
+            align-items: flex-start;
+            flex-direction: column;
+        }
     }
     </style>
     """,
@@ -2420,11 +3874,26 @@ for opcion in opciones_navegacion:
     st.sidebar.button(
         opcion,
         key=f"navegacion_{claves_navegacion[opcion]}",
+        icon=iconos_navegacion[opcion],
         type="primary" if st.session_state.menu_activo == opcion else "secondary",
         use_container_width=True,
         on_click=actualizar_menu_activo,
         args=(opcion,),
     )
+
+st.sidebar.button(
+    "Gestión de Personal",
+    key="navegacion_gestion_personal",
+    icon=":material/calendar_month:",
+    type=(
+        "primary"
+        if st.session_state.menu_activo == "Gestión de Personal"
+        else "secondary"
+    ),
+    use_container_width=True,
+    on_click=actualizar_menu_activo,
+    args=("Gestión de Personal",),
+)
 
 seccion = st.session_state.menu_activo
 if "admin_autorizado" not in st.session_state:
@@ -2434,7 +3903,6 @@ is_admin = st.session_state.admin_autorizado
 is_supervisor = str(st.session_state.get("rol_usuario", "")).startswith(
     "Supervisor"
 )
-df_registros = consultar_dataframe()
 USUARIOS_SUPERVISORES = sorted(
     nombre
     for nombre, cuenta in usuarios.items()
@@ -2480,6 +3948,8 @@ def mostrar_menu_usuario():
             st.session_state.menu_activo = "Registros"
             st.session_state.pop("_registros_sesion", None)
             st.session_state.pop("_alcance_registros_sesion", None)
+            st.session_state.pop("_gestion_personal_prefetch", None)
+            st.session_state.pop("_gestion_personal_prefetch_future", None)
             st.session_state.pop("_usuarios_sesion", None)
             st.session_state.pop("_usuarios_eliminados_sesion", None)
             for key in (
@@ -2507,8 +3977,127 @@ if (
     and not is_admin
     and not (seccion in {"Gestión", "Control"} and is_supervisor)
 ):
-    st.title(construir_titulo_seccion(seccion))
+    mostrar_titulo_seccion(seccion)
     st.error("Acceso restringido. Se requiere una cuenta de Administrador.")
+    st.stop()
+
+df_registros = None
+if seccion in {
+    "Registros",
+    "Control",
+    "Finanzas",
+    "Personal",
+    "Gestión de Personal",
+}:
+    df_registros = _obtener_registros_sesion(copiar=False)
+
+if seccion == "Gestión de Personal":
+    cache_resumenes_adelantos = {}
+    cache_metricas_bonificacion = {}
+
+    def _metricas_bonificacion_personal(fecha):
+        if fecha not in cache_metricas_bonificacion:
+            registros_acumulados = filtrar_registros_acumulados_mes(
+                df_registros,
+                fecha,
+            )
+            metricas_por_lavador, _ = calcular_metricas_lavadores(
+                registros_acumulados,
+                lista_lavadores,
+            )
+            cache_metricas_bonificacion[fecha] = metricas_por_lavador
+        return cache_metricas_bonificacion[fecha]
+
+    def _resumen_adelantos_personal(fecha_inicio, fecha_fin):
+        clave = (fecha_inicio, fecha_fin)
+        if clave not in cache_resumenes_adelantos:
+            cache_resumenes_adelantos[clave] = (
+                database.consultar_resumen_adelantos_registros_personal(
+                    fecha_inicio,
+                    fecha_fin,
+                )
+            )
+        return cache_resumenes_adelantos[clave]
+
+    def obtener_bonificacion_mensual_personal(nombre, fecha):
+        metricas = _metricas_bonificacion_personal(fecha).get(
+            nombre.strip().casefold()
+        )
+        return (
+            Decimal(str(metricas["monto"] / 30))
+            if metricas
+            else Decimal("0")
+        )
+
+    def obtener_desglose_bonificacion_mensual_personal(nombre, fecha):
+        metricas = _metricas_bonificacion_personal(fecha).get(
+            nombre.strip().casefold(),
+        )
+        if metricas is None:
+            metricas = {}
+        return {
+            "solitarios": metricas.get("solitarios", 0),
+            "compartidos": metricas.get("compartidos", 0),
+            "grupales": metricas.get("grupales", 0),
+            "monto_solitario": metricas.get("monto_solitario", 0),
+            "monto_compartido": metricas.get("monto_compartido", 0),
+            "monto_grupal": metricas.get("monto_grupal", 0),
+        }
+
+    def obtener_adelantos_registrados_personal(
+        nombre, periodo_inicio, periodo_fin
+    ):
+        trabajador = " ".join(nombre.casefold().split())
+        return sum(
+            (
+                Decimal(str(registro["importe"]))
+                for registro
+                in _resumen_adelantos_personal(
+                    periodo_inicio,
+                    periodo_fin,
+                )
+                if registro["trabajador"] == trabajador
+            ),
+            Decimal("0.00"),
+        )
+
+    def obtener_detalle_adelantos_mensuales_personal(nombre, fecha):
+        inicio = fecha.replace(day=1)
+        fin = fecha.replace(
+            day=calendar.monthrange(fecha.year, fecha.month)[1]
+        )
+        trabajador = " ".join(nombre.casefold().split())
+        return [
+            {
+                "fecha": registro["fecha"],
+                "importe": Decimal(str(registro["importe"])),
+                "solicitudes": registro["solicitudes"],
+            }
+            for registro
+            in _resumen_adelantos_personal(
+                inicio,
+                fin,
+            )
+            if registro["trabajador"] == trabajador
+        ]
+
+    st.session_state[
+        "_gestion_personal_obtener_adelantos_registrados"
+    ] = obtener_adelantos_registrados_personal
+    st.session_state[
+        "_gestion_personal_obtener_detalle_adelantos_mensuales"
+    ] = obtener_detalle_adelantos_mensuales_personal
+    st.session_state[
+        "_gestion_personal_obtener_desglose_bonificacion_mensual"
+    ] = obtener_desglose_bonificacion_mensual_personal
+    with st.spinner("Cargando datos del periodo..."):
+        render_gestion_personal(
+            lista_lavadores,
+            datetime.now(ZONA_HORARIA_PERU).date(),
+            st.session_state.usuario_actual,
+            obtener_bonificacion_mensual_personal,
+        )
+    mostrar_notificacion_exito()
     st.stop()
 
 @st.dialog("Confirmar eliminación definitiva")
@@ -2571,8 +4160,361 @@ def mostrar_confirmacion_eliminar_supervisor(nombre):
         )
         st.rerun()
 
+if seccion == "Personal":
+   st.markdown(
+       '<div id="personal-theme-marker" aria-hidden="true"></div>',
+       unsafe_allow_html=True,
+   )
+   mostrar_titulo_seccion(seccion)
+   ahora_personal = datetime.now(ZONA_HORARIA_PERU)
+   col_lavador_personal, col_periodo_personal, col_fecha_personal = st.columns(
+       [1.4, 1.0, 1.5]
+   )
+   with col_lavador_personal:
+       lavadores_disponibles = lista_lavadores or ["Sin lavadores registrados"]
+       lavador_personal = st.selectbox(
+           "Lavador",
+           lavadores_disponibles,
+           key="lavador_rendimiento_personal",
+           disabled=not lista_lavadores,
+       )
+   with col_periodo_personal:
+       periodo_personal = st.selectbox(
+           "Periodo",
+           ["Día", "Mes"],
+           key="periodo_rendimiento_personal",
+       )
+   with col_fecha_personal:
+       fecha_personal = seleccionar_fecha(
+           "Fecha de referencia",
+           "fecha_rendimiento_personal",
+           ahora_personal.date(),
+       )
+
+   if not lista_lavadores:
+       st.info("Agrega lavadores desde Gestión para consultar su rendimiento.")
+   else:
+       registros_personal_periodo = (
+           filtrar_registros_por_fecha(df_registros, fecha_personal)
+           if periodo_personal == "Día"
+           else filtrar_registros_por_mes(df_registros, fecha_personal)
+       )
+       metricas_personal, _ = calcular_metricas_lavador(
+           registros_personal_periodo,
+           lavador_personal,
+       )
+       _, detalle_personal_dia = calcular_metricas_lavador(
+           filtrar_registros_por_fecha(df_registros, fecha_personal),
+           lavador_personal,
+       )
+       _, detalle_personal_mes = calcular_metricas_lavador(
+           filtrar_registros_por_mes(df_registros, fecha_personal),
+           lavador_personal,
+       )
+       registros_acumulado_mes_personal = filtrar_registros_acumulados_mes(
+           df_registros,
+           fecha_personal,
+       )
+       metricas_acumulado_mes_personal, _ = calcular_metricas_lavador(
+           registros_acumulado_mes_personal,
+           lavador_personal,
+       )
+       etiqueta_fecha_personal = (
+           fecha_personal.strftime("%d/%m/%Y")
+           if periodo_personal == "Día"
+           else fecha_personal.strftime("%m/%Y")
+       )
+       tarjetas_personal = (
+           (
+               "directions_car",
+               "Vehículos lavados",
+               metricas_personal["vehiculos"],
+               "servicios realizados",
+               "total",
+               False,
+           ),
+           (
+               "person",
+               "Solitario",
+               metricas_personal["solitarios"],
+               "lavador único",
+               "acumulado",
+               False,
+           ),
+           (
+               "group",
+               "Compartido (2 lavadores)",
+               metricas_personal["compartidos"],
+               "servicios compartidos",
+               "compartido",
+               False,
+           ),
+           (
+               "groups",
+               "Grupal (3 lavadores)",
+               metricas_personal["grupales"],
+               "servicios grupales",
+               "grupal",
+               False,
+           ),
+       )
+       tarjetas_html_personal = []
+       for (
+           icono_personal,
+           etiqueta_tarjeta_personal,
+           valor_tarjeta_personal,
+           unidad_tarjeta_personal,
+           clase_tarjeta_personal,
+           es_monto_personal,
+       ) in tarjetas_personal:
+           valor_formateado_personal = (
+               f"S/ {valor_tarjeta_personal:.2f}"
+               if es_monto_personal
+               else f"{valor_tarjeta_personal:d}"
+           )
+           tarjetas_html_personal.append(
+               '<div class="reportes-kpi-card '
+               f'{clase_tarjeta_personal}">'
+               '<div class="reportes-kpi-acento"></div>'
+               '<div class="reportes-kpi-icono" aria-hidden="true">'
+               f"{icono_personal}</div>"
+               f'<div class="reportes-kpi-etiqueta">'
+               f"{escape(etiqueta_tarjeta_personal)}</div>"
+               '<div class="reportes-kpi-valor">'
+               f"{valor_formateado_personal}</div>"
+               '<div class="reportes-kpi-unidad">'
+               f"{escape(unidad_tarjeta_personal)}</div></div>"
+           )
+       st.markdown(
+           '<section class="reportes-kpi-panel personal-resumen-panel">'
+           '<div class="reportes-kpi-header">'
+           f'<span class="reportes-kpi-heading">'
+           f'{escape(lavador_personal)} · Resumen del periodo</span>'
+           f'<span class="reportes-kpi-periodo">{periodo_personal} · '
+           f'{etiqueta_fecha_personal}</span>'
+           '</div>'
+           f'<div class="personal-resumen-grid">{"".join(tarjetas_html_personal)}</div>'
+           '</section>',
+           unsafe_allow_html=True,
+       )
+
+       tarjetas_ingresos_personal = (
+           (
+               "person",
+               "Monto Solitario",
+               metricas_personal["monto_solitario"],
+               "parte proporcional asignada",
+               "efectivo",
+           ),
+           (
+               "group",
+               "Monto Compartido (2 lavadores)",
+               metricas_personal["monto_compartido"],
+               "parte proporcional asignada",
+               "yape",
+           ),
+           (
+               "groups",
+               "Monto Grupal (3 lavadores)",
+               metricas_personal["monto_grupal"],
+               "parte proporcional asignada",
+               "plin",
+           ),
+           (
+               "payments",
+               "Monto Total Acumulado",
+               metricas_personal["monto"],
+               "total producido",
+               "transferencia",
+           ),
+       )
+       tarjetas_html_ingresos_personal = "".join(
+           '<div class="reportes-kpi-card supervisor finanzas-metodo-card '
+           f'finanzas-metodo-{clase_ingreso_personal}">'
+           '<div class="reportes-kpi-acento"></div>'
+           '<div class="reportes-kpi-icono" aria-hidden="true">'
+           f"{icono_ingreso_personal}</div>"
+           f'<div class="reportes-kpi-etiqueta">'
+           f"{escape(etiqueta_ingreso_personal)}</div>"
+           '<div class="reportes-kpi-valor">'
+           f"S/ {monto_ingreso_personal:.2f}</div>"
+           '<div class="reportes-kpi-unidad">'
+           f"{escape(unidad_ingreso_personal)}</div></div>"
+           for (
+               icono_ingreso_personal,
+               etiqueta_ingreso_personal,
+               monto_ingreso_personal,
+               unidad_ingreso_personal,
+               clase_ingreso_personal,
+           ) in tarjetas_ingresos_personal
+       )
+       st.markdown(
+           '<section class="reportes-kpi-panel personal-ingresos-panel">'
+           '<div class="reportes-kpi-header">'
+           '<span class="reportes-kpi-heading">'
+           f"Ingresos Producidos · {periodo_personal} seleccionado"
+           '</span>'
+           f'<span class="reportes-kpi-periodo">{etiqueta_fecha_personal}</span>'
+           '</div>'
+           f'<div class="finanzas-kpi-grid">'
+           f"{tarjetas_html_ingresos_personal}</div>"
+           '</section>',
+           unsafe_allow_html=True,
+       )
+
+       with st.container(border=True, key="personal_bonificacion_panel"):
+           st.markdown(
+               '<div class="reportes-kpi-header">'
+               '<span class="reportes-kpi-heading">'
+               f'{escape(lavador_personal)} · Bonificación Acumulada del Mes'
+               '</span>'
+               f'<span class="reportes-kpi-periodo">Hasta '
+               f'{fecha_personal.strftime("%d/%m/%Y")}</span>'
+               '</div>',
+               unsafe_allow_html=True,
+           )
+           col_bonificacion_personal, col_grafico_modalidad_personal = st.columns(
+               [1, 1.5]
+           )
+           with col_bonificacion_personal:
+               st.markdown(
+                   '<div class="personal-bonificacion-card">'
+                   '<div class="personal-bonificacion-etiqueta">'
+                   'Monto de Bonificación</div>'
+                   '<div class="personal-bonificacion-valor">'
+                   f'S/ {metricas_acumulado_mes_personal["monto"] / 30:.2f}'
+                   '</div>'
+                   '<div class="personal-bonificacion-pie">'
+                   'Acumulado en lo que va del mes</div></div>',
+                   unsafe_allow_html=True,
+               )
+
+           with col_grafico_modalidad_personal:
+               datos_modalidad_personal = pd.DataFrame(
+                   [
+                       {
+                           "Modalidad": "Solitario",
+                           "Autos": metricas_acumulado_mes_personal["solitarios"],
+                           "Monto acumulado": (
+                               "S/ "
+                               f'{metricas_acumulado_mes_personal["monto_solitario"]:.2f}'
+                           ),
+                       },
+                       {
+                           "Modalidad": "Compartido",
+                           "Autos": metricas_acumulado_mes_personal["compartidos"],
+                           "Monto acumulado": (
+                               "S/ "
+                               f'{metricas_acumulado_mes_personal["monto_compartido"]:.2f}'
+                           ),
+                       },
+                       {
+                           "Modalidad": "Grupal",
+                           "Autos": metricas_acumulado_mes_personal["grupales"],
+                           "Monto acumulado": (
+                               "S/ "
+                               f'{metricas_acumulado_mes_personal["monto_grupal"]:.2f}'
+                           ),
+                       },
+                   ]
+               )
+               grafico_modalidad_personal = (
+                   alt.Chart(datos_modalidad_personal)
+                   .mark_arc(innerRadius=58, outerRadius=105)
+                   .encode(
+                       theta=alt.Theta("Autos:Q", stack=True),
+                       color=alt.Color(
+                           "Modalidad:N",
+                           scale=alt.Scale(
+                               domain=["Solitario", "Compartido", "Grupal"],
+                               range=["#20d38a", "#36b8ff", "#b779f7"],
+                           ),
+                           legend=alt.Legend(title=None),
+                       ),
+                       tooltip=[
+                           alt.Tooltip("Modalidad:N", title="Categoría"),
+                           alt.Tooltip("Autos:Q", title="Cantidad de Autos", format="d"),
+                           alt.Tooltip(
+                               "Monto acumulado:N",
+                               title="Monto Acumulado",
+                           ),
+                       ],
+                   )
+                   .properties(height=250)
+                   .configure(background="transparent")
+                   .configure_legend(
+                       labelColor="#dce6f2",
+                       titleColor="#dce6f2",
+                   )
+                   .configure_view(strokeOpacity=0)
+               )
+               with st.container(
+                   border=True,
+                   key="personal_bonificacion_chart",
+               ):
+                   st.markdown(
+                       '<div class="reportes-kpi-etiqueta">'
+                       'Desglose de Trabajo por Tipo de Servicio</div>',
+                       unsafe_allow_html=True,
+                   )
+                   if metricas_acumulado_mes_personal["vehiculos"]:
+                       st.altair_chart(
+                           grafico_modalidad_personal,
+                           use_container_width=True,
+                       )
+                   else:
+                       st.info(
+                           "Aún no hay servicios para este lavador "
+                           "en el mes seleccionado."
+                       )
+
+       st.subheader("Detalle de servicios")
+       for titulo_detalle_personal, detalle_personal, periodo_detalle_personal in (
+           (
+               "Más detalles de servicios (Día)",
+               detalle_personal_dia,
+               "el día seleccionado",
+           ),
+           (
+               "Más detalles de servicios (Mes)",
+               detalle_personal_mes,
+               "el mes seleccionado",
+           ),
+       ):
+           with st.expander(titulo_detalle_personal, expanded=False):
+               if detalle_personal.empty:
+                   st.info(
+                       "No hay servicios para este lavador en "
+                       f"{periodo_detalle_personal}."
+                   )
+               else:
+                   st.dataframe(
+                       detalle_personal,
+                       use_container_width=True,
+                       hide_index=True,
+                       column_config={
+                           "Monto del lavado": st.column_config.NumberColumn(
+                               format="S/ %.2f"
+                           ),
+                           "Monto producido": st.column_config.NumberColumn(
+                               format="S/ %.2f"
+                           ),
+                       },
+                   )
+
+   mostrar_notificacion_exito()
+   st.stop()
+
+
 if seccion == "Finanzas":
-    st.title(construir_titulo_seccion(seccion))
+    df_finanzas, responsables_finanzas = obtener_registros_financieros_sesion(
+        df_registros
+    )
+    st.markdown(
+        '<div id="finanzas-theme-marker" aria-hidden="true"></div>',
+        unsafe_allow_html=True,
+    )
+    mostrar_titulo_seccion(seccion)
     ahora_finanzas = datetime.now(ZONA_HORARIA_PERU)
     nombres_meses_finanzas = [
         "Enero",
@@ -2601,18 +4543,18 @@ if seccion == "Finanzas":
     periodo_mensual_finanzas = (
         f"{mes_referencia_finanzas} {fecha_referencia_mes.year}"
     )
-    registros_balance_mes = filtrar_registros_por_mes(
-        df_registros, fecha_referencia_mes
+    registros_balance_mes = filtrar_registros_financieros(
+        df_finanzas, fecha_referencia_mes, "Mes"
     )
-    ingresos_mes, _ = desglosar_metodos_financieros(
+    ingresos_mes, _ = desglosar_registros_financieros(
         registros_balance_mes
     )
     ganancia_mes = sum(ingresos_mes.values())
 
-    registros_balance_ingresos_dia = filtrar_registros_por_fecha(
-        df_registros, fecha_referencia_balance
+    registros_balance_ingresos_dia = filtrar_registros_financieros(
+        df_finanzas, fecha_referencia_balance, "Día"
     )
-    ingresos_dia, _ = desglosar_metodos_financieros(
+    ingresos_dia, _ = desglosar_registros_financieros(
         registros_balance_ingresos_dia
     )
     ganancia_dia = sum(ingresos_dia.values())
@@ -2648,20 +4590,26 @@ if seccion == "Finanzas":
             "transferencia": "transferencia",
             "tarjeta": "tarjeta",
         }
+        etiqueta_categoria = "Ingresos" if categoria == "ingreso" else "Gastos"
         tarjetas = "".join(
-            '<div class="reportes-kpi-card '
+            f'<div class="reportes-kpi-card '
             f'{"gasto" if categoria == "gasto" else "supervisor"} '
-            f'finanzas-metodo-card finanzas-metodo-{clases_metodo.get(metodo.casefold(), "otros")}">'
+            f'finanzas-metodo-card finanzas-metodo-{clases_metodo.get(metodo.casefold(), "otros")}" '
+            f'tabindex="0" role="group" '
+            f'aria-label="{escape(metodo)}: S/ {montos[metodo]:.2f}, {etiqueta_categoria}">'
             '<div class="reportes-kpi-acento"></div>'
             '<div class="reportes-kpi-icono" aria-hidden="true">'
-            f'{"payments" if categoria == "ingreso" else "account_balance_wallet"}'
+            'payments'
             '</div>'
             f'<div class="reportes-kpi-etiqueta">{escape(metodo)}</div>'
             f'<div class="reportes-kpi-valor">S/ {montos[metodo]:.2f}</div>'
             '<div class="reportes-kpi-unidad">'
-            f'{"ingresos" if categoria == "ingreso" else "gastos"}'
+            f'{etiqueta_categoria}'
             '</div></div>'
             for metodo in orden_metodos
+        )
+        clase_panel = (
+            "finanzas-expense-panel" if categoria == "gasto" else "finanzas-income-panel"
         )
         periodo = (
             fecha.strftime("%d/%m/%Y")
@@ -2669,7 +4617,7 @@ if seccion == "Finanzas":
             else f"{nombres_meses_finanzas[fecha.month - 1]} {fecha.year}"
         )
         st.markdown(
-            '<section class="reportes-kpi-panel">'
+            f'<section class="reportes-kpi-panel {clase_panel}">'
             '<div class="reportes-kpi-header">'
             f'<span class="reportes-kpi-heading">{escape(titulo)}</span>'
             f'<span class="reportes-kpi-periodo">{periodo}</span>'
@@ -2681,13 +4629,19 @@ if seccion == "Finanzas":
 
     st.markdown(
         '<div class="finanzas-balance-grid">'
-        '<div class="finanzas-balance-card">'
+        '<div class="finanzas-balance-card ingreso">'
+        '<span class="finanzas-balance-icon" aria-hidden="true">payments</span>'
+        '<div class="finanzas-balance-content">'
         '<div class="finanzas-balance-etiqueta">Ingresos netos del día</div>'
         f'<div class="finanzas-balance-valor">S/ {ganancia_dia:.2f}</div>'
         '</div>'
-        '<div class="finanzas-balance-card">'
+        '</div>'
+        '<div class="finanzas-balance-card ingreso">'
+        '<span class="finanzas-balance-icon" aria-hidden="true">calendar_month</span>'
+        '<div class="finanzas-balance-content">'
         '<div class="finanzas-balance-etiqueta">Ingresos netos del mes</div>'
         f'<div class="finanzas-balance-valor">S/ {ganancia_mes:.2f}</div>'
+        '</div>'
         '</div>'
         '</div>',
         unsafe_allow_html=True,
@@ -2720,29 +4674,35 @@ if seccion == "Finanzas":
         f"{nombres_meses_finanzas[fecha_referencia_mes_gastos.month - 1]} "
         f"{fecha_referencia_mes_gastos.year}"
     )
-    registros_balance_gastos_mes = filtrar_registros_por_mes(
-        df_registros, fecha_referencia_mes_gastos
+    registros_balance_gastos_mes = filtrar_registros_financieros(
+        df_finanzas, fecha_referencia_mes_gastos, "Mes"
     )
-    _, gastos_mes = desglosar_metodos_financieros(
+    _, gastos_mes = desglosar_registros_financieros(
         registros_balance_gastos_mes
     )
     gasto_mes = sum(gastos_mes.values())
-    registros_balance_gastos_dia = filtrar_registros_por_fecha(
-        df_registros, fecha_referencia_gastos
+    registros_balance_gastos_dia = filtrar_registros_financieros(
+        df_finanzas, fecha_referencia_gastos, "Día"
     )
-    _, gastos_dia = desglosar_metodos_financieros(
+    _, gastos_dia = desglosar_registros_financieros(
         registros_balance_gastos_dia
     )
     gasto_dia = sum(gastos_dia.values())
     st.markdown(
         '<div class="finanzas-balance-grid">'
         '<div class="finanzas-balance-card gasto">'
+        '<span class="finanzas-balance-icon" aria-hidden="true">account_balance_wallet</span>'
+        '<div class="finanzas-balance-content">'
         '<div class="finanzas-balance-etiqueta">Gastos netos del día</div>'
         f'<div class="finanzas-balance-valor">S/ {gasto_dia:.2f}</div>'
         '</div>'
+        '</div>'
         '<div class="finanzas-balance-card gasto">'
+        '<span class="finanzas-balance-icon" aria-hidden="true">calendar_month</span>'
+        '<div class="finanzas-balance-content">'
         '<div class="finanzas-balance-etiqueta">Gastos netos del mes</div>'
         f'<div class="finanzas-balance-valor">S/ {gasto_mes:.2f}</div>'
+        '</div>'
         '</div>'
         '</div>',
         unsafe_allow_html=True,
@@ -2764,65 +4724,8 @@ if seccion == "Finanzas":
             "gasto",
         )
 
-    st.divider()
-    with st.expander("Rendimiento de ingresos por supervisor", expanded=False):
-        col_periodo_finanzas, col_fecha_finanzas, _ = st.columns(
-            [1.2, 1.5, 3.3]
-        )
-        with col_periodo_finanzas:
-            periodo_finanzas = st.selectbox(
-                "Periodo del desglose",
-                ["Día", "Mes"],
-                key="periodo_desglose_finanzas",
-            )
-        with col_fecha_finanzas:
-            fecha_finanzas = seleccionar_fecha(
-                "Fecha de referencia",
-                "fecha_desglose_finanzas",
-                ahora_finanzas.date(),
-            )
-
-        ingresos_responsables = calcular_ingresos_por_responsable(
-            df_registros, fecha_finanzas, periodo_finanzas
-        )
-        etiqueta_periodo_finanzas = (
-            fecha_finanzas.strftime("%d/%m/%Y")
-            if periodo_finanzas == "Día"
-            else fecha_finanzas.strftime("%m/%Y")
-        )
-        tarjetas_finanzas = []
-        for responsable, monto in ingresos_responsables.items():
-            tarjetas_finanzas.append(
-                '<div class="reportes-kpi-card supervisor">'
-                '<div class="reportes-kpi-acento"></div>'
-                '<div class="reportes-kpi-icono" aria-hidden="true">support_agent</div>'
-                f'<div class="reportes-kpi-etiqueta">{escape(responsable)}</div>'
-                f'<div class="reportes-kpi-valor">S/ {monto:.2f}</div>'
-                '<div class="reportes-kpi-unidad">ingresos registrados</div>'
-                '</div>'
-            )
-        tarjetas_finanzas.append(
-            '<div class="reportes-kpi-card total">'
-            '<div class="reportes-kpi-acento"></div>'
-            '<div class="reportes-kpi-icono" aria-hidden="true">payments</div>'
-            '<div class="reportes-kpi-etiqueta">Total del equipo</div>'
-            f'<div class="reportes-kpi-valor">S/ {ingresos_responsables.sum():.2f}</div>'
-            '<div class="reportes-kpi-unidad">ingresos del periodo</div>'
-            '</div>'
-        )
-        st.markdown(
-            '<section class="reportes-kpi-panel">'
-            '<div class="reportes-kpi-header">'
-            '<span class="reportes-kpi-heading">Ingresos por supervisor</span>'
-            f'<span class="reportes-kpi-periodo">{periodo_finanzas} · '
-            f'{etiqueta_periodo_finanzas}</span>'
-            '</div>'
-            f'<div class="finanzas-kpi-grid">{"".join(tarjetas_finanzas)}</div>'
-            '</section>',
-            unsafe_allow_html=True,
-        )
-
-    with st.expander("Detalle de ingresos del supervisor", expanded=False):
+    st.subheader("Detalle de ingresos del supervisor")
+    with st.container():
         col_usuario_detalle, col_periodo_detalle, col_fecha_detalle, _ = st.columns(
             [1.4, 1.0, 1.5, 2.1]
         )
@@ -2837,7 +4740,8 @@ if seccion == "Finanzas":
             periodo_detalle_finanzas = st.selectbox(
                 "Periodo del detalle",
                 ["Día", "Mes"],
-                key="periodo_detalle_supervisor_finanzas",
+                index=1,
+                key="periodo_detalle_supervisor_finanzas_v2",
             )
         with col_fecha_detalle:
             fecha_detalle_finanzas = seleccionar_fecha(
@@ -2846,19 +4750,26 @@ if seccion == "Finanzas":
                 ahora_finanzas.date(),
             )
 
-        registros_supervisor_detalle = consultar_dataframe(
-            supervisor=supervisor_detalle,
-        )
+        registros_supervisor_detalle = df_finanzas
+        if supervisor_detalle is not None:
+            registros_supervisor_detalle = df_finanzas.loc[
+                df_finanzas["_responsable_busqueda_finanzas"]
+                == str(supervisor_detalle).strip().casefold()
+            ]
         if periodo_detalle_finanzas == "Día":
-            registros_supervisor_periodo = filtrar_registros_por_fecha(
-                registros_supervisor_detalle, fecha_detalle_finanzas
+            registros_supervisor_periodo = filtrar_registros_financieros(
+                registros_supervisor_detalle,
+                fecha_detalle_finanzas,
+                "Día",
             )
             tipo_periodo_detalle = "dia"
             etiqueta_periodo_detalle = fecha_detalle_finanzas.strftime("%d/%m/%Y")
             sufijo_periodo_detalle = "del día"
         else:
-            registros_supervisor_periodo = filtrar_registros_por_mes(
-                registros_supervisor_detalle, fecha_detalle_finanzas
+            registros_supervisor_periodo = filtrar_registros_financieros(
+                registros_supervisor_detalle,
+                fecha_detalle_finanzas,
+                "Mes",
             )
             tipo_periodo_detalle = "mes"
             etiqueta_periodo_detalle = (
@@ -2868,7 +4779,7 @@ if seccion == "Finanzas":
             sufijo_periodo_detalle = "del mes"
 
         ingresos_detalle_metodos, gastos_detalle_metodos = (
-            desglosar_metodos_financieros(registros_supervisor_periodo)
+            desglosar_registros_financieros(registros_supervisor_periodo)
         )
         ingreso_periodo_detalle = sum(ingresos_detalle_metodos.values())
         gasto_periodo_detalle = sum(gastos_detalle_metodos.values())
@@ -2919,12 +4830,72 @@ if seccion == "Finanzas":
             "gasto",
         )
 
+    st.divider()
+    with st.expander("Rendimiento de ingresos por supervisor", expanded=False):
+        col_periodo_finanzas, col_fecha_finanzas, _ = st.columns(
+            [1.2, 1.5, 3.3]
+        )
+        with col_periodo_finanzas:
+            periodo_finanzas = st.selectbox(
+                "Periodo del desglose",
+                ["Día", "Mes"],
+                key="periodo_desglose_finanzas",
+            )
+        with col_fecha_finanzas:
+            fecha_finanzas = seleccionar_fecha(
+                "Fecha de referencia",
+                "fecha_desglose_finanzas",
+                ahora_finanzas.date(),
+            )
+
+        ingresos_responsables = calcular_ingresos_financieros_por_responsable(
+            df_finanzas,
+            fecha_finanzas,
+            periodo_finanzas,
+            responsables_finanzas,
+        )
+        etiqueta_periodo_finanzas = (
+            fecha_finanzas.strftime("%d/%m/%Y")
+            if periodo_finanzas == "Día"
+            else fecha_finanzas.strftime("%m/%Y")
+        )
+        tarjetas_finanzas = []
+        for responsable, monto in ingresos_responsables.items():
+            tarjetas_finanzas.append(
+                '<div class="reportes-kpi-card supervisor">'
+                '<div class="reportes-kpi-acento"></div>'
+                '<div class="reportes-kpi-icono" aria-hidden="true">support_agent</div>'
+                f'<div class="reportes-kpi-etiqueta">{escape(responsable)}</div>'
+                f'<div class="reportes-kpi-valor">S/ {monto:.2f}</div>'
+                '<div class="reportes-kpi-unidad">ingresos registrados</div>'
+                '</div>'
+            )
+        tarjetas_finanzas.append(
+            '<div class="reportes-kpi-card total">'
+            '<div class="reportes-kpi-acento"></div>'
+            '<div class="reportes-kpi-icono" aria-hidden="true">payments</div>'
+            '<div class="reportes-kpi-etiqueta">Total del equipo</div>'
+            f'<div class="reportes-kpi-valor">S/ {ingresos_responsables.sum():.2f}</div>'
+            '<div class="reportes-kpi-unidad">ingresos del periodo</div>'
+            '</div>'
+        )
+        st.markdown(
+            '<section class="reportes-kpi-panel">'
+            '<div class="reportes-kpi-header">'
+            '<span class="reportes-kpi-heading">Ingresos por supervisor</span>'
+            f'<span class="reportes-kpi-periodo">{periodo_finanzas} · '
+            f'{etiqueta_periodo_finanzas}</span>'
+            '</div>'
+            f'<div class="finanzas-kpi-grid">{"".join(tarjetas_finanzas)}</div>'
+            '</section>',
+            unsafe_allow_html=True,
+        )
+
     mostrar_notificacion_exito()
     st.stop()
 
 if seccion == "Gestión":
-    st.title(construir_titulo_seccion(seccion))
-    st.caption("Administra el personal, los tipos de vehículos y los servicios disponibles.")
+    mostrar_titulo_seccion(seccion)
     st.markdown(
         """
         <style>
@@ -3183,7 +5154,12 @@ if seccion == "Gestión":
     st.stop()
 
 if seccion == "Control":
-    st.title(construir_titulo_seccion(seccion))
+    mostrar_titulo_seccion(
+        seccion,
+        "Registro de servicios y gastos para supervisión."
+        if is_supervisor
+        else None,
+    )
     st.markdown("---")
     st.subheader(
         "Registro de Servicios y Gastos - Supervisor"
@@ -3380,8 +5356,9 @@ if seccion == "Control":
         )
         st.stop()
 
-    ahora_ajustes = datetime.now(ZONA_HORARIA_PERU)
-    registros_mes = filtrar_registros_del_mes(df_registros, ahora_ajustes)
+    registros_mes = filtrar_registros_por_mes(
+        df_registros, fecha_registros_ajustes
+    )
     registros_dia = filtrar_registros_por_fecha(
         df_registros, fecha_registros_ajustes
     )
@@ -3395,10 +5372,19 @@ if seccion == "Control":
             == responsable_ajustes
         ].copy()
 
+    etiqueta_responsable_exportacion = (
+        f" del {responsable_ajustes}"
+        if responsable_ajustes != "Todos"
+        else ""
+    )
     col_exportar_dia, col_exportar_mes = st.columns(2)
     with col_exportar_dia:
         st.download_button(
-            "Exportar Excel por Día",
+            (
+                f"Exportar Excel{etiqueta_responsable_exportacion} (Día)"
+                if responsable_ajustes != "Todos"
+                else "Exportar Excel por Día"
+            ),
             data=generar_excel_registros(registros_dia),
             file_name=f"registros_{fecha_registros_ajustes:%Y-%m-%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3408,9 +5394,13 @@ if seccion == "Control":
         )
     with col_exportar_mes:
         st.download_button(
-            "Exportar Excel por Mes",
+            (
+                f"Exportar Excel{etiqueta_responsable_exportacion} (Mes)"
+                if responsable_ajustes != "Todos"
+                else "Exportar Excel por Mes"
+            ),
             data=generar_excel_registros(registros_mes),
-            file_name=f"registros_{ahora_ajustes:%Y-%m}.xlsx",
+            file_name=f"registros_{fecha_registros_ajustes:%Y-%m}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="exportar_excel_ajustes_mes",
             disabled=registros_mes.empty,
@@ -3590,7 +5580,7 @@ with st.container(key="registros_hero"):
             datetime.now(ZONA_HORARIA_PERU).date(),
             on_change=cambiar_fecha_tabla,
         )
-st.title(construir_titulo_seccion("Registros"))
+mostrar_titulo_seccion("Registros")
 st.caption(f"Fecha: {fecha_ver.strftime('%d/%m/%Y')}")
 
 # --- TABLA DE REGISTROS (PROCESADA PRIMERO PARA CARGAR LA SELECCIÓN) ---
@@ -3604,20 +5594,52 @@ if is_admin:
     st.subheader("Selecciona una fila para editar")
 
     with st.container(border=True):
-        col_f1, col_f2 = st.columns(2)
+        col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
-            busqueda_placa = st.text_input("Buscar por Placa", key="busqueda_placa_input")
+            busqueda_placa = st.text_input(
+                "Buscar por Placa",
+                key="busqueda_placa_input",
+                on_change=reiniciar_seleccion_tabla,
+            )
         with col_f2:
             filtro_pago = st.selectbox(
                 "Filtrar por Método de Pago",
                 ["Todos", *lista_pagos, "Yape/Plin"],
                 key="filtro_pago_select",
+                on_change=reiniciar_seleccion_tabla,
+            )
+        with col_f3:
+            filtro_responsable = st.selectbox(
+                "Filtrar por Responsable",
+                [
+                    "Todos",
+                    "Supervisor 1",
+                    "Supervisor 2",
+                    "Supervisor 3",
+                    "Supervisor 4",
+                ],
+                key="filtro_responsable_registros",
+                on_change=reiniciar_seleccion_tabla,
             )
         
     if busqueda_placa:
         df_filtrado = df_filtrado[df_filtrado['Placa'].astype(str).str.contains(busqueda_placa, case=False, na=False)]
     if filtro_pago != "Todos":
         df_filtrado = df_filtrado[df_filtrado['Pago'] == filtro_pago]
+    if filtro_responsable != "Todos":
+        responsables = (
+            df_filtrado["Registrado por"]
+            .map(normalizar_responsable)
+            .astype(str)
+            .str.replace(r"[\s_-]+", "", regex=True)
+            .str.casefold()
+        )
+        responsable_seleccionado = re.sub(
+            r"[\s_-]+", "", filtro_responsable
+        ).casefold()
+        df_filtrado = df_filtrado.loc[
+            responsables == responsable_seleccionado
+        ]
     df_exportacion = df_filtrado.copy()
 
     clave_tabla = f"tabla_admin_{st.session_state.revision_tabla_fecha}"
@@ -3629,10 +5651,14 @@ if is_admin:
             crear_tabla_estilizada(
                 df_filtrado,
                 filas_seleccionadas,
+                incluir_usuario=True,
             ),
             use_container_width=True,
-            column_order=obtener_columnas_visibles_registros(df_filtrado),
-            selection_mode="single-row",
+            column_order=obtener_columnas_visibles_registros(
+                df_filtrado,
+                incluir_usuario=True,
+            ),
+            selection_mode="multi-row",
             on_select=guardar_seleccion_tabla,
             key=clave_tabla,
             hide_index=True,
@@ -3644,11 +5670,18 @@ if is_admin:
         else {}
     )
     filas_seleccionadas = seleccion_tabla.get("rows", [])
-    if filas_seleccionadas:
+    ids_seleccionados = [
+        df_filtrado.iloc[indice]["ID"]
+        for indice in filas_seleccionadas
+        if 0 <= indice < len(df_filtrado)
+    ]
+    if len(ids_seleccionados) == 1:
         indice_seleccionado = filas_seleccionadas[0]
-        if len(df_filtrado) > indice_seleccionado:
-            fila_data = df_filtrado.iloc[indice_seleccionado]
-            cargar_fila_en_formulario(fila_data)
+        cargar_fila_en_formulario(df_filtrado.iloc[indice_seleccionado])
+    elif len(ids_seleccionados) >= 2:
+        st.session_state.edit_id = None
+        st.session_state.registro_cargado_id = None
+        restablecer_campos_formulario()
     elif st.session_state.edit_id:
         st.session_state.edit_id = None
         st.session_state.registro_cargado_id = None
@@ -3667,10 +5700,12 @@ if not is_admin and not df_registros_fecha.empty:
         st.dataframe(
             crear_tabla_estilizada(
                 df_registros_fecha,
+                incluir_usuario=True,
             ),
             use_container_width=True,
             column_order=obtener_columnas_visibles_registros(
-                df_registros_fecha
+                df_registros_fecha,
+                incluir_usuario=True,
             ),
             hide_index=True,
             key="tabla_registros_supervisor",
@@ -3690,6 +5725,69 @@ st.download_button(
     use_container_width=True,
 )
 
+if is_admin and len(ids_seleccionados) >= 2:
+    st.markdown("---")
+    st.subheader(f"{len(ids_seleccionados)} registros seleccionados")
+    with st.container(border=True):
+        placas_seleccionadas = [
+            str(df_filtrado.iloc[indice]["Placa"])
+            for indice in filas_seleccionadas
+            if 0 <= indice < len(df_filtrado)
+        ]
+        st.info(
+            "Modifique la fecha o elimine los registros de las placas: "
+            + ", ".join(placas_seleccionadas)
+        )
+        fecha_nueva = st.date_input(
+            "Nueva fecha",
+            value=fecha_ver,
+            key="fecha_cambio_seleccionados",
+        )
+        if st.button(
+            "Actualizar fecha",
+            key="cambiar_fecha_seleccionados",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                actualizados = actualizar_fecha_registros(
+                    ids_seleccionados,
+                    fecha_nueva,
+                )
+            except (psycopg2.Error, ValueError) as error:
+                st.error(f"No se pudo cambiar la fecha: {error}")
+            else:
+                refrescar_registros_sesion()
+                reiniciar_seleccion_tabla()
+                notificar_exito(
+                    f"Se cambió la fecha de {actualizados} registros."
+                )
+                st.rerun()
+
+    if st.button(
+        f"Eliminar {len(ids_seleccionados)} registros seleccionados",
+        key="eliminar_registros_seleccionados",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            eliminados = eliminar_registros(ids_seleccionados)
+        except (psycopg2.Error, ValueError) as error:
+            st.error(f"No se pudieron eliminar los registros: {error}")
+        else:
+            if eliminados:
+                refrescar_registros_sesion()
+                reiniciar_seleccion_tabla()
+                limpiar_formulario()
+                notificar_exito(
+                    f"Se eliminaron {eliminados} registros.",
+                    "eliminacion",
+                )
+                st.rerun()
+            else:
+                st.error("No se encontró ningún registro seleccionado.")
+    st.stop()
+
 st.markdown("---")
 
 # --- FORMULARIO DE REGISTRO / ACTUALIZACIÓN ---
@@ -3697,10 +5795,14 @@ titulo_form = "Actualizar Registro Seleccionado" if st.session_state.edit_id els
 st.subheader(titulo_form)
 
 if st.session_state.edit_id:
-    st.warning(
+    st.info(
         f"Modificando el registro de la placa: "
         f"**{st.session_state.input_placa}**. "
         "Modifica los campos y haz clic en Guardar Cambios."
+    )
+    st.date_input(
+        "Fecha",
+        key="fecha_edicion_registro",
     )
 
 with st.container(border=True):
@@ -3716,7 +5818,11 @@ with st.container(border=True):
     with c1:
         st.selectbox("Tipo de Vehículo", lista_tipos, key="input_tipo")
     with c2:
-        st.text_input("Placa / Identificador", placeholder="Ej. ABC-123", key="input_placa")
+        st.text_input(
+            "Placa / Identificador",
+            placeholder="Ej. ABC-123",
+            key="input_placa",
+        )
     with c3:
         st.selectbox(
             "Servicio",
@@ -3725,7 +5831,11 @@ with st.container(border=True):
             accept_new_options=True,
         )
     with c4:
-        st.text_input("Monto Cobrado (S/)", key="input_monto")
+        st.text_input(
+            "Monto Cobrado (S/)",
+            placeholder="Ej. 25.00",
+            key="input_monto",
+        )
     with c5:
         st.selectbox(
             "Forma de Pago",
@@ -3737,16 +5847,29 @@ with st.container(border=True):
     st.markdown("### Cliente")
     cliente_ruc, cliente_razon_social, cliente_numero, cliente_correo = st.columns(4)
     with cliente_ruc:
-        st.text_input("RUC/DNI (opcional)", key="input_ruc_cliente")
+        st.text_input(
+            "RUC/DNI (opcional)",
+            placeholder="Ej. 12345678",
+            key="input_ruc_cliente",
+        )
     with cliente_razon_social:
         st.text_input(
             "Razón Social/Nombre (opcional)",
+            placeholder="Nombre del cliente",
             key="input_razon_social_cliente",
         )
     with cliente_numero:
-        st.text_input("Número Cliente (opcional)", key="input_numero_cliente")
+        st.text_input(
+            "Número Cliente (opcional)",
+            placeholder="Ej. 999 999 999",
+            key="input_numero_cliente",
+        )
     with cliente_correo:
-        st.text_input("Correo Cliente (opcional)", key="input_correo_cliente")
+        st.text_input(
+            "Correo Cliente (opcional)",
+            placeholder="cliente@ejemplo.com",
+            key="input_correo_cliente",
+        )
 
 with st.container(border=True):
     st.markdown("### Lavadores")
@@ -3762,9 +5885,34 @@ with st.container(border=True):
     st.markdown("### Gastos")
     g1, g2, g3 = st.columns(3)
     with g1:
-        st.text_input("Motivo Gasto (opcional)", key="input_motivo")
+        opciones_motivo_formulario = list(OPCIONES_MOTIVO_GASTO)
+        motivo_actual = str(st.session_state.input_motivo or "-").strip() or "-"
+        if motivo_actual not in opciones_motivo_formulario:
+            opciones_motivo_formulario.append(motivo_actual)
+        st.selectbox(
+            "Motivo Gasto (opcional)",
+            opciones_motivo_formulario,
+            key="input_motivo",
+            accept_new_options=True,
+        )
+        if es_motivo_adelanto(st.session_state.input_motivo):
+            opciones_lavadores_adelanto = ["-", *lista_lavadores]
+            if (
+                st.session_state.input_lavador_adelanto
+                not in opciones_lavadores_adelanto
+            ):
+                st.session_state.input_lavador_adelanto = "-"
+            st.selectbox(
+                "Seleccionar Lavador",
+                opciones_lavadores_adelanto,
+                key="input_lavador_adelanto",
+            )
     with g2:
-        st.text_input("Precio Gasto (opcional)", key="input_precio_gasto")
+        st.text_input(
+            "Precio Gasto (opcional)",
+            placeholder="Ej. 10.00",
+            key="input_precio_gasto",
+        )
     with g3:
         st.selectbox(
             "Método Gasto",
@@ -3846,6 +5994,10 @@ if btn_guardar:
         st.error("No se pudo guardar:\n\n- " + "\n- ".join(errores_validacion))
     elif st.session_state.input_placa.strip() != "":
         monto_fmt = f"S/ {float(m_val):.2f}"
+        motivo_gasto_fmt = formatear_motivo_gasto(
+            st.session_state.input_motivo,
+            st.session_state.input_lavador_adelanto,
+        )
         gasto_fmt = (
             f"S/ {float(pg_val):.2f}"
             if pg_val not in {"", "-"}
@@ -3859,10 +6011,20 @@ if btn_guardar:
                 "Servicio": st.session_state.input_servicio,
                 "Pago": st.session_state.input_pago,
                 "Monto": monto_fmt,
+                "Fecha": (
+                    datetime.combine(
+                        st.session_state.fecha_edicion_registro,
+                        st.session_state.fecha_edicion_hora_original.time(),
+                    ).strftime("%Y/%m/%d %H:%M:%S")
+                    if st.session_state.fecha_edicion_hora_original
+                    else st.session_state.fecha_edicion_registro.strftime(
+                        "%Y/%m/%d"
+                    )
+                ),
                 "Lavador 1": lavador_1 or "-",
                 "Lavador 2": lavador_2 or "-",
                 "Lavador 3": lavador_3 or "-",
-                "Motivo Gasto": st.session_state.input_motivo.strip() or "-",
+                "Motivo Gasto": motivo_gasto_fmt,
                 "Precio Gasto": gasto_fmt,
                 "Método Gasto": st.session_state.input_metodo_gasto or "-",
                 "RUC/DNI": st.session_state.input_ruc_cliente.strip() or "-",
@@ -3902,7 +6064,7 @@ if btn_guardar:
                 "Lavador 1": st.session_state.input_l1,
                 "Lavador 2": st.session_state.input_l2,
                 "Lavador 3": st.session_state.input_l3,
-                "Motivo Gasto": st.session_state.input_motivo.strip() or "-",
+                "Motivo Gasto": motivo_gasto_fmt,
                 "Precio Gasto": gasto_fmt,
                 "Método Gasto": st.session_state.input_metodo_gasto or "-",
                 NOMBRE_COLUMNA_LOCAL: "Búnker 1",
@@ -3918,11 +6080,7 @@ if btn_guardar:
                 "Correo Cliente": (
                     st.session_state.input_correo_cliente.strip() or "-"
                 ),
-                "Registrado por": (
-                    st.session_state.usuario_actual
-                    if st.session_state.rol_usuario == "Supervisor"
-                    else st.session_state.rol_usuario
-                ),
+                "Registrado por": st.session_state.usuario_actual,
             }
             try:
                 insertar_registro(nuevo_registro)
@@ -3938,12 +6096,13 @@ if btn_guardar:
 
 if btn_eliminar and st.session_state.edit_id:
     try:
-        eliminado = eliminar_registro(st.session_state.edit_id)
+        eliminados = eliminar_registros(ids_seleccionados)
     except (psycopg2.Error, ValueError) as error:
         st.error(f"No se pudo eliminar el registro: {error}")
     else:
-        if eliminado:
+        if eliminados == 1:
             refrescar_registros_sesion()
+            reiniciar_seleccion_tabla()
             limpiar_formulario()
             notificar_exito(
                 "El registro se eliminó correctamente.", "eliminacion"
