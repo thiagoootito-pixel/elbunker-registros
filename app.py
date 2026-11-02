@@ -459,6 +459,35 @@ def mostrar_formulario_editar_usuario():
         ),
         key=f"rol_editar_usuario_{clave_usuario}",
     )
+
+    if rol_elegido == "Supervisor":
+        st.text_input(
+            "Contraseña actual",
+            value="Protegida: almacenada como hash seguro, no disponible en texto plano",
+            disabled=True,
+            key=f"contrasena_actual_editar_{clave_usuario}",
+        )
+        nueva_contrasena = st.text_input(
+            "Nueva contraseña",
+            type="password",
+            key=f"nueva_contrasena_editar_{clave_usuario}",
+            help="Deja este campo vacío si solo deseas cambiar el rol.",
+        )
+        confirmar_nueva_contrasena = st.text_input(
+            "Confirmar nueva contraseña",
+            type="password",
+            key=f"confirmar_nueva_contrasena_editar_{clave_usuario}",
+        )
+        contrasena_admin = st.text_input(
+            "Contraseña de Administrador",
+            type="password",
+            key=f"contrasena_admin_editar_{clave_usuario}",
+        )
+    else:
+        nueva_contrasena = ""
+        confirmar_nueva_contrasena = ""
+        contrasena_admin = ""
+
     guardar_cambios = st.button(
         "Guardar cambios",
         type="primary",
@@ -470,7 +499,37 @@ def mostrar_formulario_editar_usuario():
     usuarios_actualizados = {
         nombre: cuenta.copy() for nombre, cuenta in usuarios.items()
     }
-    usuarios_actualizados[usuario_seleccionado]["rol"] = rol_elegido
+    cuenta_actualizada = usuarios_actualizados[usuario_seleccionado]
+    cuenta_actualizada["rol"] = rol_elegido
+
+    cambiar_contrasena = bool(nueva_contrasena or confirmar_nueva_contrasena)
+    if cambiar_contrasena and rol_elegido == "Supervisor":
+        cuenta_admin = usuarios.get(st.session_state.get("usuario_actual"))
+        if (
+            cuenta_admin is None
+            or not cuenta_admin["activo"]
+            or cuenta_admin["rol"] != "Administrador"
+            or not verificar_contrasena(cuenta_admin, contrasena_admin)
+        ):
+            st.error("La contraseña de administrador no es válida.")
+            return
+        if len(nueva_contrasena) < 8:
+            st.warning("La nueva contraseña debe tener al menos 8 caracteres.")
+            return
+        if nueva_contrasena != confirmar_nueva_contrasena:
+            st.warning("Las contraseñas nuevas no coinciden.")
+            return
+
+        salt = secrets.token_bytes(16)
+        cuenta_actualizada["contrasena"] = None
+        cuenta_actualizada["salt"] = salt.hex()
+        cuenta_actualizada["contrasena_hash"] = hashlib.pbkdf2_hmac(
+            "sha256",
+            nueva_contrasena.encode("utf-8"),
+            salt,
+            ITERACIONES_HASH_CONTRASENA,
+        ).hex()
+
     try:
         guardar_usuarios(
             usuarios_actualizados,
@@ -481,9 +540,13 @@ def mostrar_formulario_editar_usuario():
     except (psycopg2.Error, ValueError) as error:
         st.error(f"No se pudo guardar el usuario: {error}")
     else:
-        st.session_state["mensaje_gestion_usuarios"] = (
-            f"Los datos de {usuario_seleccionado} fueron actualizados."
-        )
+        mensaje = f"Los datos de {usuario_seleccionado} fueron actualizados."
+        if cambiar_contrasena and rol_elegido == "Supervisor":
+            mensaje = (
+                f"La contraseña de {usuario_seleccionado} fue cambiada "
+                "correctamente."
+            )
+        st.session_state["mensaje_gestion_usuarios"] = mensaje
         st.rerun()
 
 
