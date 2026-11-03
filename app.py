@@ -2877,6 +2877,15 @@ def formatear_motivo_gasto(motivo, lavador):
     return motivo or "-"
 
 
+def seleccionar_motivo_sugerencia():
+    motivo_seleccionado = str(
+        st.session_state.input_motivo_sugerencia or "-"
+    ).strip()
+    st.session_state.input_motivo = (
+        "" if motivo_seleccionado == "-" else motivo_seleccionado
+    )
+
+
 l1_opts = ["-", *lista_lavadores]
 l2_opts = ["-", *lista_lavadores]
 l3_opts = ["-", *lista_lavadores]
@@ -2892,7 +2901,9 @@ if "input_pago" not in st.session_state: st.session_state.input_pago = "Efectivo
 if "input_l1" not in st.session_state: st.session_state.input_l1 = "Carlos"
 if "input_l2" not in st.session_state: st.session_state.input_l2 = "-"
 if "input_l3" not in st.session_state: st.session_state.input_l3 = "-"
-if "input_motivo" not in st.session_state: st.session_state.input_motivo = "-"
+if "input_motivo" not in st.session_state: st.session_state.input_motivo = ""
+if "motivos_gasto_personalizados" not in st.session_state:
+    st.session_state.motivos_gasto_personalizados = []
 if "input_lavador_adelanto" not in st.session_state: st.session_state.input_lavador_adelanto = "-"
 if "input_precio_gasto" not in st.session_state: st.session_state.input_precio_gasto = "-"
 if "input_metodo_gasto" not in st.session_state: st.session_state.input_metodo_gasto = "-"
@@ -2929,7 +2940,7 @@ def restablecer_campos_formulario():
     st.session_state.input_l1 = "Carlos" if "Carlos" in lista_lavadores else (lista_lavadores[0] if lista_lavadores else "-")
     st.session_state.input_l2 = "-"
     st.session_state.input_l3 = "-"
-    st.session_state.input_motivo = "-"
+    st.session_state.input_motivo = ""
     st.session_state.input_lavador_adelanto = "-"
     st.session_state.input_precio_gasto = "-"
     st.session_state.input_metodo_gasto = "-"
@@ -3001,7 +3012,7 @@ def cargar_fila_en_formulario(fila_data):
             motivo_guardado = "AD."
             st.session_state.input_lavador_adelanto = lavador
             break
-    st.session_state.input_motivo = motivo_guardado or "-"
+    st.session_state.input_motivo = motivo_guardado or ""
     precio_gasto = str(fila_data['Precio Gasto']).replace("S/", "").strip()
     st.session_state.input_precio_gasto = "" if precio_gasto.casefold() in {"", "-", "nan", "none"} else precio_gasto
     metodo_gasto = str(fila_data['Método Gasto']).strip()
@@ -5949,14 +5960,31 @@ with st.container(border=True):
     g1, g2, g3 = st.columns(3)
     with g1:
         opciones_motivo_formulario = list(OPCIONES_MOTIVO_GASTO)
+        for motivo_personalizado in st.session_state.motivos_gasto_personalizados:
+            if motivo_personalizado not in opciones_motivo_formulario:
+                opciones_motivo_formulario.append(motivo_personalizado)
         motivo_actual = str(st.session_state.input_motivo or "-").strip() or "-"
         if motivo_actual not in opciones_motivo_formulario:
             opciones_motivo_formulario.append(motivo_actual)
-        st.selectbox(
+            if motivo_actual != "-" and not es_motivo_adelanto(motivo_actual):
+                st.session_state.motivos_gasto_personalizados.append(motivo_actual)
+
+        st.text_input(
             "Motivo Gasto (opcional)",
-            opciones_motivo_formulario,
             key="input_motivo",
-            accept_new_options=True,
+            placeholder="Escribe un motivo o selecciona uno abajo",
+        )
+        indice_sugerencia = (
+            opciones_motivo_formulario.index(motivo_actual)
+            if motivo_actual in opciones_motivo_formulario
+            else 0
+        )
+        seleccion_sugerida = st.selectbox(
+            "Seleccionar motivo",
+            opciones_motivo_formulario,
+            index=indice_sugerencia,
+            key="input_motivo_sugerencia",
+            on_change=seleccionar_motivo_sugerencia,
         )
         if es_motivo_adelanto(st.session_state.input_motivo):
             opciones_lavadores_adelanto = ["-", *lista_lavadores]
@@ -6057,6 +6085,18 @@ if btn_guardar:
         st.error("No se pudo guardar:\n\n- " + "\n- ".join(errores_validacion))
     elif st.session_state.input_placa.strip() != "":
         monto_fmt = f"S/ {float(m_val):.2f}"
+        motivo_ingresado = str(
+            st.session_state.input_motivo or "-"
+        ).strip()
+        if (
+            motivo_ingresado
+            and motivo_ingresado != "-"
+            and motivo_ingresado not in OPCIONES_MOTIVO_GASTO
+            and motivo_ingresado not in st.session_state.motivos_gasto_personalizados
+        ):
+            st.session_state.motivos_gasto_personalizados.append(
+                motivo_ingresado
+            )
         motivo_gasto_fmt = formatear_motivo_gasto(
             st.session_state.input_motivo,
             st.session_state.input_lavador_adelanto,
