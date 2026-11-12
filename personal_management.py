@@ -2770,7 +2770,7 @@ def _contenido_dialogo_editar_personal(nombre, perfil, actor, referencia):
                         st.text_input(
                             "Cargo *",
                             key=f"{prefijo}_cargo",
-                            placeholder="Ej. Lavador",
+                            placeholder="Ej. Colaborador",
                         )
                     col_ingreso, col_estado = st.columns(2)
                     with col_ingreso:

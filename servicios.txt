@@ -1,13 +1,13 @@
 Lavado Básico
-Lavado Completo
-Encerado
 Motor
 Pintura
 Pulido
 Lavado De Salon
-pintura completa
 Planchado
 L. Basico+Pulido
-L. Basico+Motor
+L. Basico + Motor
+L. Basico + Cera
 L. Basico+Chasis,Motor,Cera
 Tratamiento de cerámico
+Pintura general
+Pintura x paño

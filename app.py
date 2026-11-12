@@ -120,7 +120,7 @@ def mostrar_titulo_seccion(seccion, descripcion=None):
         "Gestión": "Administra usuarios, vehículos y servicios.",
         "Control": "Revisa los registros de servicios y gastos.",
         "Finanzas": "Consulta los ingresos, gastos y balances del negocio.",
-        "Personal": "Servicios y montos producidos por cada lavador.",
+        "Personal": "Servicios y montos producidos por cada colaborador.",
     }
     titulo = construir_titulo_seccion(seccion)
     nombre_seccion = titulo.partition(" - ")[0]
@@ -1144,6 +1144,12 @@ st.markdown(
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 0.7rem;
     }
+    .personal-bonificacion-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin-top: 0.7rem;
+    }
     .personal-bonificacion-card {
         box-sizing: border-box;
         min-height: 11rem;
@@ -1347,6 +1353,9 @@ st.markdown(
         .personal-resumen-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
+        .personal-bonificacion-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
         .finanzas-kpi-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
@@ -1362,6 +1371,9 @@ st.markdown(
             grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .personal-resumen-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .personal-bonificacion-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
@@ -1799,9 +1811,9 @@ COLUMNAS_EXPORTACION = [
     ("Monto", "MONTO"),
     ("Fecha", "FECHA"),
     ("Hora", "HORA"),
-    ("Lavador 1", "LAVADOR 1"),
-    ("Lavador 2", "LAVADOR 2"),
-    ("Lavador 3", "LAVADOR 3"),
+    ("Lavador 1", "COLABORADOR 1"),
+    ("Lavador 2", "COLABORADOR 2"),
+    ("Lavador 3", "COLABORADOR 3"),
     ("Motivo Gasto", "MOTIVO GASTO"),
     ("Precio Gasto", "PRECIO GASTO"),
     ("Método Gasto", "MÉTODO GASTO"),
@@ -2015,6 +2027,13 @@ def crear_tabla_estilizada(
             "Hora",
             fechas_separadas.map(lambda valor: valor[1]),
         )
+    df_visual = df_visual.rename(
+        columns={
+            "Lavador 1": "Colaborador 1",
+            "Lavador 2": "Colaborador 2",
+            "Lavador 3": "Colaborador 3",
+        }
+    )
     filas_seleccionadas = filas_seleccionadas or set()
     return df_visual.style.apply(
         lambda fila: estilo_fila_tabla(fila, filas_seleccionadas), axis=1
@@ -2031,7 +2050,14 @@ def obtener_columnas_visibles_registros(df, incluir_usuario=False):
         columnas.insert(0, "Registrado por")
     if "Fecha" in columnas:
         columnas.insert(columnas.index("Fecha") + 1, "Hora")
-    return columnas
+    return [
+        {
+            "Lavador 1": "Colaborador 1",
+            "Lavador 2": "Colaborador 2",
+            "Lavador 3": "Colaborador 3",
+        }.get(columna, columna)
+        for columna in columnas
+    ]
 
 
 def guardar_seleccion_tabla():
@@ -2449,8 +2475,8 @@ def calcular_metricas_lavadores(df, lavadores, lavador_detalle=None):
 
     claves_monto_modalidad = {
         1: ("Solitario", "solitarios", "monto_solitario"),
-        2: ("Compartido (2 lavadores)", "compartidos", "monto_compartido"),
-        3: ("Grupal (3 lavadores)", "grupales", "monto_grupal"),
+        2: ("Compartido (2 colaboradores)", "compartidos", "monto_compartido"),
+        3: ("Grupal (3 colaboradores)", "grupales", "monto_grupal"),
     }
     for registro in df.to_dict("records"):
         tipo_registro = registro.get("Tipo", "")
@@ -2499,8 +2525,21 @@ def calcular_metricas_lavadores(df, lavadores, lavador_detalle=None):
             return "" if pd.isna(valor) else str(valor)
 
         fecha_registro = parsear_fecha(registro.get("Fecha", ""))
+        responsable_registro = normalizar_responsable(
+            registro.get("Registrado por", "")
+        )
+        coincidencia_supervisor = re.fullmatch(
+            r"supervisor\s*([1-4])",
+            responsable_registro,
+            re.IGNORECASE,
+        )
+        if coincidencia_supervisor:
+            responsable_registro = (
+                f"Supervisor {coincidencia_supervisor.group(1)}"
+            )
         detalles.append(
             {
+                "Registrado por": responsable_registro,
                 "Fecha": (
                     fecha_registro.strftime("%d/%m/%Y %I:%M %p")
                     if pd.notna(fecha_registro)
@@ -2730,17 +2769,29 @@ if (
             f"Se consultarán al abrir el módulo: {error}"
         )
 lista_tipos = cargar_catalogo(
-    ARCHIVO_VEHICULOS, ["Auto", "Moto", "Motaxi", "Camioneta", "Bicicleta"]
+    ARCHIVO_VEHICULOS,
+    [
+        "Sedán",
+        "Auto",
+        "Moto",
+        "Motaxi",
+        "Camioneta",
+        "Pick Up",
+        "Van",
+        "Furgón",
+        "Camión",
+        "Cuatrimoto",
+        "Bicicleta",
+    ],
 )
 lista_servicios = cargar_catalogo(
     ARCHIVO_SERVICIOS,
     [
         "Lavado Simple",
-        "Lavado Completo",
-        "Encerado",
         "Lavado De Salon",
         "L. Basico+Pulido",
-        "L. Basico+Motor",
+        "L. Basico + Motor",
+        "L. Basico + Cera",
         "L. Basico+Chasis,Motor,Cera",
         "Tratamiento de cerámico",
     ],
@@ -2756,10 +2807,10 @@ def mostrar_formulario_catalogo(tipo_catalogo):
     catalogos = {
         "personal": (
             "Nuevo nombre",
-            "Registrar Lavador",
+            "Registrar Colaborador",
             ARCHIVO_LAVADORES,
             lista_lavadores,
-            "Lavador",
+            "Colaborador",
         ),
         "vehiculo": (
             "Nuevo tipo de vehículo",
@@ -2845,7 +2896,7 @@ def mostrar_confirmacion_baja_personal(nombre):
             st.session_state[clave] = "-"
     st.session_state.pop("gestion_seleccion_activa", None)
     notificar_exito(
-        f"Lavador {nombre} dado de baja correctamente.",
+        f"Colaborador {nombre} dado de baja correctamente.",
         "eliminacion",
         destino="personal",
     )
@@ -2858,6 +2909,15 @@ OPCIONES_MOTIVO_GASTO = [
     "AD. (Adelanto)",
     "Almuerzo",
     "Limpieza",
+    "Gastos fijos",
+    "Insumos",
+    "Sueldo",
+    "Mantenimiento local",
+    "Mantenimiento equipos",
+    "Gasto en personal",
+    "Propina",
+    "Debe",
+    "Inversión",
     "Otros",
 ]
 
@@ -3990,7 +4050,7 @@ def mostrar_menu_usuario():
         if st.session_state.rol_usuario == "Administrador"
         else "Supervisor"
         if st.session_state.rol_usuario.startswith("Supervisor")
-        else "Lavador"
+        else "Colaborador"
     )
     with st.popover(
         ":material/account_circle:",
@@ -4245,9 +4305,13 @@ if seccion == "Personal":
        [1.4, 1.0, 1.5]
    )
    with col_lavador_personal:
-       lavadores_disponibles = lista_lavadores or ["Sin lavadores registrados"]
+       lavadores_disponibles = (
+           ["Todos", *lista_lavadores]
+           if lista_lavadores
+           else ["Sin colaboradores registrados"]
+       )
        lavador_personal = st.selectbox(
-           "Lavador",
+           "Colaborador",
            lavadores_disponibles,
            key="lavador_rendimiento_personal",
            disabled=not lista_lavadores,
@@ -4266,28 +4330,182 @@ if seccion == "Personal":
        )
 
    if not lista_lavadores:
-       st.info("Agrega lavadores desde Gestión para consultar su rendimiento.")
+       st.info("Agrega colaboradores desde Gestión para consultar su rendimiento.")
    else:
+       registros_personal_base = df_registros
+       responsable_personal = "Todos"
+       if lavador_personal == "Todos":
+           responsables_personal = obtener_responsables_reporte(df_registros)
+           responsable_personal = st.selectbox(
+               "Filtrar registros por",
+               ["Todos", *responsables_personal],
+               key="responsable_rendimiento_personal",
+           )
+           if responsable_personal != "Todos":
+               def clave_responsable_personal(valor):
+                   responsable = normalizar_responsable(valor)
+                   return re.sub(
+                       r"[\s_-]+", "", responsable
+                   ).casefold()
+
+               clave_seleccionada_personal = clave_responsable_personal(
+                   responsable_personal
+               )
+               coincide_responsable_personal = df_registros[
+                   "Registrado por"
+               ].map(clave_responsable_personal)
+               registros_personal_base = df_registros.loc[
+                   coincide_responsable_personal
+                   == clave_seleccionada_personal
+               ].copy()
+
        registros_personal_periodo = (
-           filtrar_registros_por_fecha(df_registros, fecha_personal)
+           filtrar_registros_por_fecha(
+               registros_personal_base, fecha_personal
+           )
            if periodo_personal == "Día"
-           else filtrar_registros_por_mes(df_registros, fecha_personal)
+           else filtrar_registros_por_mes(
+               registros_personal_base, fecha_personal
+           )
        )
+       registros_acumulado_mes_personal = filtrar_registros_acumulados_mes(
+           registros_personal_base,
+           fecha_personal,
+       )
+       if lavador_personal == "Todos":
+           metricas_todos_personal, _ = calcular_metricas_lavadores(
+               registros_acumulado_mes_personal,
+               lista_lavadores,
+           )
+           tarjetas_bonificacion_todos = []
+           for nombre_lavador_personal in lista_lavadores:
+               metricas_lavador_todos = metricas_todos_personal.get(
+                   nombre_lavador_personal.strip().casefold(),
+               )
+               if (
+                   metricas_lavador_todos is None
+                   or not metricas_lavador_todos["vehiculos"]
+               ):
+                   continue
+               tarjetas_bonificacion_todos.append(
+                   '<div class="personal-bonificacion-card">'
+                   '<div class="personal-bonificacion-etiqueta">'
+                   f'{escape(nombre_lavador_personal)}</div>'
+                   '<div class="personal-bonificacion-valor">'
+                   f'S/ {metricas_lavador_todos["monto"] / 30:.2f}'
+                   '</div>'
+                   '<div class="personal-bonificacion-pie">'
+                   'Bonificación acumulada del mes</div></div>'
+               )
+
+           st.markdown(
+               '<div class="reportes-kpi-header">'
+               '<span class="reportes-kpi-heading">'
+               'Bonificación acumulada por colaborador</span>'
+               f'<span class="reportes-kpi-periodo">Hasta '
+               f'{fecha_personal.strftime("%d/%m/%Y")}</span>'
+               '</div>',
+               unsafe_allow_html=True,
+           )
+           if tarjetas_bonificacion_todos:
+               st.markdown(
+                   '<div class="personal-bonificacion-grid">'
+                   f'{"".join(tarjetas_bonificacion_todos)}'
+                   '</div>',
+                   unsafe_allow_html=True,
+               )
+           else:
+               st.info(
+                   "No hay servicios para los filtros seleccionados "
+                   "hasta esta fecha."
+               )
+
+           st.subheader("Detalle de servicios")
+           for (
+               titulo_detalle_personal,
+               registros_detalle_personal,
+               periodo_detalle_personal,
+           ) in (
+               (
+                   "Más detalles de servicios (Día)",
+                   filtrar_registros_por_fecha(
+                       registros_personal_base, fecha_personal
+                   ),
+                   "el día seleccionado",
+               ),
+               (
+                   "Más detalles de servicios (Mes)",
+                   filtrar_registros_por_mes(
+                       registros_personal_base, fecha_personal
+                   ),
+                   "el mes seleccionado",
+               ),
+           ):
+               with st.expander(
+                   titulo_detalle_personal,
+                   expanded=False,
+               ):
+                   detalles_lavadores_personal = []
+                   for nombre_lavador_personal in lista_lavadores:
+                       _, detalle_lavador_personal = (
+                           calcular_metricas_lavador(
+                               registros_detalle_personal,
+                               nombre_lavador_personal,
+                           )
+                       )
+                       if not detalle_lavador_personal.empty:
+                           detalle_lavador_personal.insert(
+                               1,
+                               "Colaborador",
+                               nombre_lavador_personal,
+                           )
+                           detalles_lavadores_personal.append(
+                               detalle_lavador_personal
+                           )
+                   if not detalles_lavadores_personal:
+                       st.info(
+                           "No hay servicios para los filtros seleccionados "
+                           f"{periodo_detalle_personal}."
+                       )
+                   else:
+                       st.dataframe(
+                           pd.concat(
+                               detalles_lavadores_personal,
+                               ignore_index=True,
+                           ),
+                           use_container_width=True,
+                           hide_index=True,
+                           column_config={
+                               "Monto del lavado": (
+                                   st.column_config.NumberColumn(
+                                       format="S/ %.2f"
+                                   )
+                               ),
+                               "Monto producido": (
+                                   st.column_config.NumberColumn(
+                                       format="S/ %.2f"
+                                   )
+                               ),
+                           },
+                       )
+           mostrar_notificacion_exito()
+           st.stop()
+
        metricas_personal, _ = calcular_metricas_lavador(
            registros_personal_periodo,
            lavador_personal,
        )
        _, detalle_personal_dia = calcular_metricas_lavador(
-           filtrar_registros_por_fecha(df_registros, fecha_personal),
+           filtrar_registros_por_fecha(
+               registros_personal_base, fecha_personal
+           ),
            lavador_personal,
        )
        _, detalle_personal_mes = calcular_metricas_lavador(
-           filtrar_registros_por_mes(df_registros, fecha_personal),
+           filtrar_registros_por_mes(
+               registros_personal_base, fecha_personal
+           ),
            lavador_personal,
-       )
-       registros_acumulado_mes_personal = filtrar_registros_acumulados_mes(
-           df_registros,
-           fecha_personal,
        )
        metricas_acumulado_mes_personal, _ = calcular_metricas_lavador(
            registros_acumulado_mes_personal,
@@ -4311,13 +4529,13 @@ if seccion == "Personal":
                "person",
                "Solitario",
                metricas_personal["solitarios"],
-               "lavador único",
+               "colaborador único",
                "acumulado",
                False,
            ),
            (
                "group",
-               "Compartido (2 lavadores)",
+               "Compartido (2 colaboradores)",
                metricas_personal["compartidos"],
                "servicios compartidos",
                "compartido",
@@ -4325,7 +4543,7 @@ if seccion == "Personal":
            ),
            (
                "groups",
-               "Grupal (3 lavadores)",
+               "Grupal (3 colaboradores)",
                metricas_personal["grupales"],
                "servicios grupales",
                "grupal",
@@ -4382,14 +4600,14 @@ if seccion == "Personal":
            ),
            (
                "group",
-               "Monto Compartido (2 lavadores)",
+               "Monto Compartido (2 colaboradores)",
                metricas_personal["monto_compartido"],
                "parte proporcional asignada",
                "yape",
            ),
            (
                "groups",
-               "Monto Grupal (3 lavadores)",
+               "Monto Grupal (3 colaboradores)",
                metricas_personal["monto_grupal"],
                "parte proporcional asignada",
                "plin",
@@ -4538,7 +4756,7 @@ if seccion == "Personal":
                        )
                    else:
                        st.info(
-                           "Aún no hay servicios para este lavador "
+                           "Aún no hay servicios para este colaborador "
                            "en el mes seleccionado."
                        )
 
@@ -4558,7 +4776,7 @@ if seccion == "Personal":
            with st.expander(titulo_detalle_personal, expanded=False):
                if detalle_personal.empty:
                    st.info(
-                       "No hay servicios para este lavador en "
+                       "No hay servicios para este colaborador en "
                        f"{periodo_detalle_personal}."
                    )
                else:
@@ -5032,8 +5250,8 @@ if seccion == "Gestión":
     catalogos_gestion = (
         (
             "personal",
-            "Lavadores",
-            "Control de Lavadores",
+            "Colaboradores",
+            "Control de Colaboradores",
             lista_lavadores,
             "personas registradas",
             "Agregar Personal +",
@@ -5535,7 +5753,9 @@ if seccion == "Control":
             [
                 {
                     "Nombre de usuario": nombre,
-                    "Rol": cuenta["rol"],
+                    "Rol": str(cuenta["rol"]).replace(
+                        "Lavador", "Colaborador"
+                    ),
                     "Último inicio de sesión": (
                         datetime.fromisoformat(cuenta["ultimo_inicio_sesion"]).strftime(
                             "%d/%m/%Y %H:%M"
@@ -5946,14 +6166,14 @@ with st.container(border=True):
         )
 
 with st.container(border=True):
-    st.markdown("### Lavadores")
+    st.markdown("### Colaboradores")
     l1, l2, l3 = st.columns(3)
     with l1:
-        st.selectbox("Lavador 1", l1_opts, key="input_l1")
+        st.selectbox("Colaborador 1", l1_opts, key="input_l1")
     with l2:
-        st.selectbox("Lavador 2", l2_opts, key="input_l2")
+        st.selectbox("Colaborador 2", l2_opts, key="input_l2")
     with l3:
-        st.selectbox("Lavador 3", l3_opts, key="input_l3")
+        st.selectbox("Colaborador 3", l3_opts, key="input_l3")
         
 with st.container(border=True):
     st.markdown("### Gastos")
@@ -5994,7 +6214,7 @@ with st.container(border=True):
             ):
                 st.session_state.input_lavador_adelanto = "-"
             st.selectbox(
-                "Seleccionar Lavador",
+                "Seleccionar Colaborador",
                 opciones_lavadores_adelanto,
                 key="input_lavador_adelanto",
             )
@@ -6073,12 +6293,12 @@ if btn_guardar:
         if lavador != "-"
     ]
     if not lavadores_seleccionados:
-        errores_validacion.append("Selecciona al menos un lavador para el servicio.")
+        errores_validacion.append("Selecciona al menos un colaborador para el servicio.")
     elif len({lavador.casefold() for lavador in lavadores_seleccionados}) < len(
         lavadores_seleccionados
     ):
         errores_validacion.append(
-            "No puedes seleccionar el mismo lavador más de una vez."
+            "No puedes seleccionar el mismo colaborador más de una vez."
         )
 
     if errores_validacion:

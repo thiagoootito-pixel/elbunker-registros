@@ -4,3 +4,7 @@ Moto
 Auto
 Van
 Bicicleta
+Pick Up
+Furgón
+Camión
+Cuatrimoto

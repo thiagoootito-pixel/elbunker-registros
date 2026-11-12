@@ -78,16 +78,30 @@ class App:
                 "Merwin", "William", "Pedro", "Felix", "Marco",
             ],
         )
-        self.lista_vehiculos = self.cargar_lista(self.archivo_vehiculos, ["Sedán", "SUV", "Camioneta", "Moto"])
+        self.lista_vehiculos = self.cargar_lista(
+            self.archivo_vehiculos,
+            [
+                "Sedán",
+                "SUV",
+                "Auto",
+                "Camioneta",
+                "Pick Up",
+                "Van",
+                "Furgón",
+                "Camión",
+                "Moto",
+                "Cuatrimoto",
+                "Bicicleta",
+            ],
+        )
         self.lista_servicios = self.cargar_lista(
             self.archivo_servicios,
             [
                 "Lavado Básico",
-                "Lavado Completo",
-                "Encerado",
                 "Motor",
                 "L. Basico+Pulido",
-                "L. Basico+Motor",
+                "L. Basico + Motor",
+                "L. Basico + Cera",
                 "L. Basico+Chasis,Motor,Cera",
                 "Tratamiento de cerámico",
             ],
@@ -178,7 +192,7 @@ class App:
         # Contenedor Lavador
         frame_lbl_lavador = tk.Frame(self.form_frame, bg="#1A1A1A")
         frame_lbl_lavador.grid(row=1, column=5, sticky="w", padx=5)
-        tk.Label(frame_lbl_lavador, text="Lavador 1 ", bg="#1A1A1A", fg="#CCCCCC", font=("Arial", 9)).pack(side="left")
+        tk.Label(frame_lbl_lavador, text="Colaborador 1 ", bg="#1A1A1A", fg="#CCCCCC", font=("Arial", 9)).pack(side="left")
         self.btn_add_lavador = tk.Button(frame_lbl_lavador, text="[+]", command=self.toggle_slot_lavador, bg="#1A1A1A", fg="#2ECC71", font=("Arial", 9, "bold"), bd=0, cursor="hand2")
         self.btn_add_lavador.pack(side="left")
 
@@ -298,7 +312,10 @@ class App:
         self.tree.pack(side="left", fill="both", expand=True)
 
         for col in ("ID",) + columnas_visibles:
-            self.tree.heading(col, text=col)
+            self.tree.heading(
+                col,
+                text=col.replace("Lavador", "Colaborador"),
+            )
             self.tree.column(col, width=130, anchor="center")
         
         self.tree["displaycolumns"] = columnas_visibles
@@ -386,7 +403,7 @@ class App:
         self.tab_personal = tk.Frame(self.notebook, bg="#111111", padx=10, pady=15)
         self.notebook.add(self.tab_personal, text="👥 Personal")
 
-        tk.Label(self.tab_personal, text="CONTROL DE LAVADORES", bg="#111111", fg="#E67E22", font=("Arial", 11, "bold")).pack(anchor="w", pady=(0, 10))
+        tk.Label(self.tab_personal, text="CONTROL DE COLABORADORES", bg="#111111", fg="#E67E22", font=("Arial", 11, "bold")).pack(anchor="w", pady=(0, 10))
         
         frame_lista = tk.Frame(self.tab_personal, bg="#111111")
         frame_lista.pack(fill="both", expand=True, pady=5)
@@ -404,7 +421,7 @@ class App:
         self.entry_nuevo_lavador = tk.Entry(frame_acciones_p, font=("Arial", 10), **self.estilo_input)
         self.entry_nuevo_lavador.pack(fill="x", pady=5)
         
-        tk.Button(frame_acciones_p, text="✚ Registrar Lavador", command=self.admin_agregar_lavador, bg="#27AE60", fg="white", font=("Arial", 9, "bold"), bd=0, pady=4, cursor="hand2").pack(fill="x", pady=2)
+        tk.Button(frame_acciones_p, text="✚ Registrar Colaborador", command=self.admin_agregar_lavador, bg="#27AE60", fg="white", font=("Arial", 9, "bold"), bd=0, pady=4, cursor="hand2").pack(fill="x", pady=2)
         tk.Button(frame_acciones_p, text="🗑 Dar de Baja Seleccionado", command=self.admin_eliminar_lavador, bg="#C0392B", fg="white", font=("Arial", 9, "bold"), bd=0, pady=4, cursor="hand2").pack(fill="x", pady=2)
 
         # TAB 3: CONFIGURACIONES
@@ -624,7 +641,7 @@ class App:
 
     def ejecutar_alta(self):
         if not all([self.tipo_carro.get().strip(), self.placa.get().strip(), self.servicio.get(), self.pago.get(), self.monto.get().strip(), self.cb_lavador1.get()]):
-            messagebox.showerror("Error", "Los campos del servicio y el Lavador 1 son obligatorios.")
+            messagebox.showerror("Error", "Los campos del servicio y el Colaborador 1 son obligatorios.")
             return
 
         try:
@@ -655,7 +672,7 @@ class App:
         lavador_2 = "-"
         if self.mostrar_segundo_lavador and self.cb_lavador2.get():
             if self.cb_lavador1.get() == self.cb_lavador2.get():
-                messagebox.showerror("Error", "No repitas el mismo lavador.")
+                messagebox.showerror("Error", "No repitas el mismo colaborador.")
                 return
             lavador_2 = self.cb_lavador2.get()
 
@@ -773,7 +790,7 @@ class App:
             ws = wb.active
             ws.title = "Reporte de Lavado"
             
-            encabezados = ["TIPO", "PLACA", "SERVICIO", "PAGO", "MONTO", "FECHA", "LAVADOR 1", "LAVADOR 2", "MOTIVO GASTO", "PRECIO GASTO"]
+            encabezados = ["TIPO", "PLACA", "SERVICIO", "PAGO", "MONTO", "FECHA", "COLABORADOR 1", "COLABORADOR 2", "MOTIVO GASTO", "PRECIO GASTO"]
             ws.append(encabezados)
             
             fill_header = PatternFill(start_color="111111", end_color="111111", fill_type="solid")
