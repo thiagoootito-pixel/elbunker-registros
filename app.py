@@ -6013,6 +6013,78 @@ if is_admin:
         else:
             st.info("No hay movimientos que coincidan con los filtros.")
 
+if is_admin and ids_seleccionados:
+    st.markdown("---")
+    etiqueta_seleccion = (
+        "1 registro seleccionado"
+        if len(ids_seleccionados) == 1
+        else f"{len(ids_seleccionados)} registros seleccionados"
+    )
+    st.subheader(etiqueta_seleccion)
+    with st.container(border=True):
+        placas_seleccionadas = [
+            str(df_filtrado.iloc[indice]["Placa"])
+            for indice in filas_seleccionadas
+            if 0 <= indice < len(df_filtrado)
+        ]
+        if len(ids_seleccionados) >= 2:
+            st.info(
+                "Modifique la fecha o elimine los registros de las placas: "
+                + ", ".join(placas_seleccionadas)
+            )
+            fecha_nueva = st.date_input(
+                "Nueva fecha",
+                value=fecha_ver,
+                key="fecha_cambio_seleccionados",
+            )
+            if st.button(
+                "Actualizar fecha",
+                key="cambiar_fecha_seleccionados",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    actualizados = actualizar_fecha_registros(
+                        ids_seleccionados,
+                        fecha_nueva,
+                    )
+                except (psycopg2.Error, ValueError) as error:
+                    st.error(f"No se pudo cambiar la fecha: {error}")
+                else:
+                    refrescar_registros_sesion()
+                    reiniciar_seleccion_tabla()
+                    notificar_exito(
+                        f"Se cambió la fecha de {actualizados} registros."
+                    )
+                    st.rerun()
+
+        texto_eliminar = (
+            f"Eliminar {len(ids_seleccionados)} registros seleccionados"
+            if len(ids_seleccionados) >= 2
+            else "Eliminar registro seleccionado"
+        )
+        if st.button(
+            texto_eliminar,
+            key="eliminar_registros_seleccionados",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                eliminados = eliminar_registros(ids_seleccionados)
+            except (psycopg2.Error, ValueError) as error:
+                st.error(f"No se pudieron eliminar los registros: {error}")
+            else:
+                if eliminados:
+                    refrescar_registros_sesion()
+                    reiniciar_seleccion_tabla()
+                    limpiar_formulario()
+                    notificar_exito(
+                        f"Se eliminaron {eliminados} registros.",
+                        "eliminacion",
+                    )
+                    st.rerun()
+                else:
+                    st.error("No se encontró ningún registro seleccionado.")
 if is_supervisor and not df_registros_fecha.empty:
     st.subheader("Selecciona una fila para corregir")
     clave_tabla = (
@@ -6047,9 +6119,10 @@ if is_supervisor and not df_registros_fecha.empty:
     filas_seleccionadas = seleccion_tabla.get("rows", [])
     if len(filas_seleccionadas) == 1:
         indice_seleccionado = filas_seleccionadas[0]
-        cargar_fila_en_formulario(
-            df_registros_fecha.iloc[indice_seleccionado]
-        )
+        if 0 <= indice_seleccionado < len(df_registros_fecha):
+            cargar_fila_en_formulario(
+                df_registros_fecha.iloc[indice_seleccionado]
+            )
     elif len(filas_seleccionadas) > 1:
         st.session_state.edit_id = None
         st.session_state.registro_cargado_id = None
@@ -6064,79 +6137,95 @@ if is_supervisor and not df_registros_fecha.empty:
 elif is_supervisor:
     st.info(f"No hay registros para el {fecha_ver.strftime('%d/%m/%Y')}.")
 
-st.download_button(
-    "Exportar a Excel",
-    data=generar_excel_registros(df_exportacion),
-    file_name=(
-        f"registros_{fecha_ver.strftime('%Y-%m-%d')}_bunker.xlsx"
-    ),
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    key="descargar_registros_excel",
-    type="primary",
-    use_container_width=True,
+df_registros_disponibles = _obtener_registros_sesion(copiar=False)
+meses_exportables = {
+    date(fecha.year, fecha.month, 1)
+    for fecha in df_registros_disponibles["Fecha"].map(parsear_fecha)
+    if pd.notna(fecha)
+}
+mes_exportacion_inicial = date(fecha_ver.year, fecha_ver.month, 1)
+meses_exportables.add(mes_exportacion_inicial)
+meses_exportables = sorted(meses_exportables, reverse=True)
+nombres_meses_exportacion = (
+    "Enero",
+    "Febrero",
+    "Marzo",
+    "Abril",
+    "Mayo",
+    "Junio",
+    "Julio",
+    "Agosto",
+    "Septiembre",
+    "Octubre",
+    "Noviembre",
+    "Diciembre",
 )
 
-if is_admin and len(ids_seleccionados) >= 2:
-    st.markdown("---")
-    st.subheader(f"{len(ids_seleccionados)} registros seleccionados")
-    with st.container(border=True):
-        placas_seleccionadas = [
-            str(df_filtrado.iloc[indice]["Placa"])
-            for indice in filas_seleccionadas
-            if 0 <= indice < len(df_filtrado)
-        ]
-        st.info(
-            "Modifique la fecha o elimine los registros de las placas: "
-            + ", ".join(placas_seleccionadas)
-        )
-        fecha_nueva = st.date_input(
-            "Nueva fecha",
-            value=fecha_ver,
-            key="fecha_cambio_seleccionados",
-        )
-        if st.button(
-            "Actualizar fecha",
-            key="cambiar_fecha_seleccionados",
-            type="primary",
-            use_container_width=True,
-        ):
-            try:
-                actualizados = actualizar_fecha_registros(
-                    ids_seleccionados,
-                    fecha_nueva,
-                )
-            except (psycopg2.Error, ValueError) as error:
-                st.error(f"No se pudo cambiar la fecha: {error}")
-            else:
-                refrescar_registros_sesion()
-                reiniciar_seleccion_tabla()
-                notificar_exito(
-                    f"Se cambió la fecha de {actualizados} registros."
-                )
-                st.rerun()
+clave_mes_exportacion = "mes_exportacion_registros"
+if st.session_state.get(clave_mes_exportacion) not in meses_exportables:
+    st.session_state[clave_mes_exportacion] = mes_exportacion_inicial
+mes_exportacion = st.session_state[clave_mes_exportacion]
 
-    if st.button(
-        f"Eliminar {len(ids_seleccionados)} registros seleccionados",
-        key="eliminar_registros_seleccionados",
+df_mes_exportacion = consultar_dataframe(mes=mes_exportacion)
+if is_admin:
+    if busqueda_placa:
+        df_mes_exportacion = df_mes_exportacion[
+            df_mes_exportacion["Placa"]
+            .astype(str)
+            .str.contains(busqueda_placa, case=False, na=False)
+        ]
+    if filtro_pago != "Todos":
+        df_mes_exportacion = df_mes_exportacion[
+            df_mes_exportacion["Pago"] == filtro_pago
+        ]
+    if filtro_responsable != "Todos":
+        responsables_mes = (
+            df_mes_exportacion["Registrado por"]
+            .map(normalizar_responsable)
+            .astype(str)
+            .str.replace(r"[\s_-]+", "", regex=True)
+            .str.casefold()
+        )
+        responsable_mes_seleccionado = re.sub(
+            r"[\s_-]+", "", filtro_responsable
+        ).casefold()
+        df_mes_exportacion = df_mes_exportacion.loc[
+            responsables_mes == responsable_mes_seleccionado
+        ]
+
+col_exportar_dia, col_exportar_mes = st.columns(2)
+with col_exportar_dia:
+    st.download_button(
+        "Exportar en Excel (Día)",
+        data=generar_excel_registros(df_exportacion),
+        file_name=f"registros_{fecha_ver:%Y-%m-%d}_bunker.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="descargar_registros_excel_dia",
         type="primary",
+        disabled=df_exportacion.empty,
         use_container_width=True,
-    ):
-        try:
-            eliminados = eliminar_registros(ids_seleccionados)
-        except (psycopg2.Error, ValueError) as error:
-            st.error(f"No se pudieron eliminar los registros: {error}")
-        else:
-            if eliminados:
-                refrescar_registros_sesion()
-                reiniciar_seleccion_tabla()
-                limpiar_formulario()
-                notificar_exito(
-                    f"Se eliminaron {eliminados} registros.",
-                    "eliminacion",
-                )
-                st.rerun()
-            else:
-                st.error("No se encontró ningún registro seleccionado.")
+    )
+with col_exportar_mes:
+    st.download_button(
+        f"Exportar en Excel ({nombres_meses_exportacion[mes_exportacion.month - 1]})",
+        data=generar_excel_registros(df_mes_exportacion),
+        file_name=f"registros_{mes_exportacion:%Y-%m}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="descargar_registros_excel_mes",
+        type="primary",
+        disabled=df_mes_exportacion.empty,
+        use_container_width=True,
+    )
+    st.selectbox(
+        "Mes a exportar",
+        meses_exportables,
+        format_func=lambda mes: (
+            f"{nombres_meses_exportacion[mes.month - 1]} {mes.year}"
+        ),
+        key=clave_mes_exportacion,
+    )
+
+if is_admin and len(ids_seleccionados) >= 2:
     st.stop()
 
 st.markdown("---")
@@ -6288,22 +6377,46 @@ with st.container(border=True):
             key="input_metodo_gasto",
         )
 
-col_acc1, col_acc2 = st.columns(2)
-with col_acc1:
+if is_supervisor and st.session_state.edit_id:
+    col_guardar, col_eliminar = st.columns(2)
+else:
+    col_guardar = st.container()
+    col_eliminar = None
+
+with col_guardar:
     texto_boton = "Guardar Cambios de Actualización" if st.session_state.edit_id else "Guardar Registro"
     btn_guardar = st.button(
         texto_boton, key="guardar_registro_btn", use_container_width=True, type="primary"
     )
-with col_acc2:
-    if st.session_state.edit_id and is_admin:
-        btn_eliminar = st.button(
-            "Eliminar este Registro", key="eliminar_registro_btn", type="secondary",
-            use_container_width=True
+btn_eliminar_supervisor = False
+if col_eliminar is not None:
+    with col_eliminar:
+        btn_eliminar_supervisor = st.button(
+            "Eliminar registro seleccionado",
+            key="eliminar_registro_supervisor_seleccionado",
+            type="secondary",
+            use_container_width=True,
         )
-    else:
-        btn_eliminar = False
 
 mostrar_notificacion_exito()
+
+if btn_eliminar_supervisor and st.session_state.edit_id:
+    try:
+        eliminados = eliminar_registros([st.session_state.edit_id])
+    except (psycopg2.Error, ValueError) as error:
+        st.error(f"No se pudo eliminar el registro: {error}")
+    else:
+        if eliminados:
+            refrescar_registros_sesion()
+            reiniciar_seleccion_tabla()
+            limpiar_formulario()
+            notificar_exito(
+                "El registro se eliminó correctamente.",
+                "eliminacion",
+            )
+            st.rerun()
+        else:
+            st.error("No se encontró el registro seleccionado.")
 
 # Lógica de Guardar / Actualizar
 if btn_guardar:
@@ -6473,20 +6586,3 @@ if btn_guardar:
                 st.rerun()
     else:
         st.warning("Por favor, ingresa al menos la placa o identificador.")
-
-if btn_eliminar and st.session_state.edit_id:
-    try:
-        eliminados = eliminar_registros(ids_seleccionados)
-    except (psycopg2.Error, ValueError) as error:
-        st.error(f"No se pudo eliminar el registro: {error}")
-    else:
-        if eliminados == 1:
-            refrescar_registros_sesion()
-            reiniciar_seleccion_tabla()
-            limpiar_formulario()
-            notificar_exito(
-                "El registro se eliminó correctamente.", "eliminacion"
-            )
-            st.rerun()
-        else:
-            st.error("No se encontró el registro a eliminar.")
