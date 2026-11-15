@@ -1243,6 +1243,9 @@ st.markdown(
     .reportes-kpi-card.finanzas-metodo-tarjeta {
         --finanzas-metodo-color: #2388ff;
     }
+    .reportes-kpi-card.finanzas-metodo-debe {
+        --finanzas-metodo-color: #fbbf24;
+    }
     .reportes-kpi-card.finanzas-metodo-otros {
         --finanzas-metodo-color: #93c5fd;
     }
@@ -1948,6 +1951,7 @@ def estilo_metodo_pago(valor):
     estilos = {
         "efectivo": "background-color: #DDF3E4; color: #245B35; font-weight: 600; text-align: center;",
         "tarjeta": "background-color: #DCEBFA; color: #1E4E79; font-weight: 600; text-align: center;",
+        "debe": "background-color: #FFF1CC; color: #805B00; font-weight: 600; text-align: center;",
         "yape": "background-color: #EADFF5; color: #593477; font-weight: 600; text-align: center;",
         "yape/plin": "background-color: #EADFF5; color: #593477; font-weight: 600; text-align: center;",
         "plin": "background-color: #D9F1F8; color: #155E75; font-weight: 600; text-align: center;",
@@ -2258,6 +2262,7 @@ def normalizar_metodos_financieros(valores):
         "plin": "Plin",
         "tarjeta": "Tarjeta",
         "transferencia": "Transferencia",
+        "debe": "Debe",
         "yape/plin": "Yape/Plin (histórico)",
     }
     return metodos.map(
@@ -2266,7 +2271,14 @@ def normalizar_metodos_financieros(valores):
 
 
 def desglosar_metodos_financieros(df):
-    metodos_base = ["Efectivo", "Yape", "Plin", "Tarjeta", "Transferencia"]
+    metodos_base = [
+        "Efectivo",
+        "Yape",
+        "Plin",
+        "Tarjeta",
+        "Transferencia",
+        "Debe",
+    ]
     if df.empty:
         return {metodo: 0.0 for metodo in metodos_base}, {
             metodo: 0.0 for metodo in metodos_base
@@ -2375,7 +2387,14 @@ def filtrar_registros_financieros(df, fecha, periodo):
 
 
 def desglosar_registros_financieros(df):
-    metodos_base = ["Efectivo", "Yape", "Plin", "Tarjeta", "Transferencia"]
+    metodos_base = [
+        "Efectivo",
+        "Yape",
+        "Plin",
+        "Tarjeta",
+        "Transferencia",
+        "Debe",
+    ]
     if df.empty:
         return {metodo: 0.0 for metodo in metodos_base}, {
             metodo: 0.0 for metodo in metodos_base
@@ -2903,7 +2922,7 @@ def mostrar_confirmacion_baja_personal(nombre):
     st.rerun()
 
 
-lista_pagos = ["Efectivo", "Tarjeta", "Yape", "Plin", "Transferencia"]
+lista_pagos = ["Efectivo", "Tarjeta", "Yape", "Plin", "Transferencia", "Debe"]
 OPCIONES_MOTIVO_GASTO = [
     "-",
     "AD. (Adelanto)",
@@ -4862,6 +4881,7 @@ if seccion == "Finanzas":
                 "Plin",
                 "Tarjeta",
                 "Transferencia",
+                "Debe",
             )
             if metodo in montos
         ]
@@ -4881,6 +4901,7 @@ if seccion == "Finanzas":
             "plin": "plin",
             "transferencia": "transferencia",
             "tarjeta": "tarjeta",
+            "debe": "debe",
         }
         etiqueta_categoria = "Ingresos" if categoria == "ingreso" else "Gastos"
         tarjetas = "".join(
@@ -5884,6 +5905,9 @@ df_registros_fecha = consultar_dataframe(
 df_filtrado = df_registros_fecha.copy()
 df_exportacion = df_registros_fecha.copy()
 
+ids_seleccionados = []
+filas_seleccionadas = []
+
 if is_admin:
     st.subheader("Selecciona una fila para editar")
 
@@ -5989,11 +6013,20 @@ if is_admin:
         else:
             st.info("No hay movimientos que coincidan con los filtros.")
 
-if not is_admin and not df_registros_fecha.empty:
+if is_supervisor and not df_registros_fecha.empty:
+    st.subheader("Selecciona una fila para corregir")
+    clave_tabla = (
+        f"tabla_supervisor_{st.session_state.revision_tabla_fecha}"
+    )
+    st.session_state.tabla_admin_key_activa = clave_tabla
+    filas_seleccionadas = st.session_state.get(
+        f"filas_{clave_tabla}", set()
+    )
     with st.container(border=True):
-        st.dataframe(
+        evento_tabla = st.dataframe(
             crear_tabla_estilizada(
                 df_registros_fecha,
+                filas_seleccionadas,
                 incluir_usuario=True,
             ),
             use_container_width=True,
@@ -6001,10 +6034,34 @@ if not is_admin and not df_registros_fecha.empty:
                 df_registros_fecha,
                 incluir_usuario=True,
             ),
+            selection_mode="multi-row",
+            on_select=guardar_seleccion_tabla,
             hide_index=True,
-            key="tabla_registros_supervisor",
+            key=clave_tabla,
         )
-elif not is_admin:
+    seleccion_tabla = (
+        evento_tabla.get("selection", {})
+        if evento_tabla is not None
+        else {}
+    )
+    filas_seleccionadas = seleccion_tabla.get("rows", [])
+    if len(filas_seleccionadas) == 1:
+        indice_seleccionado = filas_seleccionadas[0]
+        cargar_fila_en_formulario(
+            df_registros_fecha.iloc[indice_seleccionado]
+        )
+    elif len(filas_seleccionadas) > 1:
+        st.session_state.edit_id = None
+        st.session_state.registro_cargado_id = None
+        restablecer_campos_formulario()
+        st.info("Selecciona una sola fila para corregirla.")
+    elif st.session_state.edit_id:
+        st.session_state.edit_id = None
+        st.session_state.registro_cargado_id = None
+        restablecer_campos_formulario()
+    else:
+        st.session_state.registro_cargado_id = None
+elif is_supervisor:
     st.info(f"No hay registros para el {fecha_ver.strftime('%d/%m/%Y')}.")
 
 st.download_button(
@@ -6238,7 +6295,7 @@ with col_acc1:
         texto_boton, key="guardar_registro_btn", use_container_width=True, type="primary"
     )
 with col_acc2:
-    if st.session_state.edit_id:
+    if st.session_state.edit_id and is_admin:
         btn_eliminar = st.button(
             "Eliminar este Registro", key="eliminar_registro_btn", type="secondary",
             use_container_width=True
